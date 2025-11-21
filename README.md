@@ -193,6 +193,47 @@ You should be able to:
 
 ---
 
+Threat Accessment:
+
+High-Level Data Flow & Trust Boundaries
+```
+Conceptual DFD in text:
+
+Browser (Public Internet)
+
+Sends HTTP(S) requests to Django app (views / DRF endpoints).
+
+Django App Server (Trust Boundary #1)
+
+Authenticates users
+
+Reads/writes to PostgreSQL (users, orders)
+
+Reads/writes to MongoDB (products cache, carts, logs)
+
+Calls Saleor GraphQL over HTTPS with API token.
+
+PostgreSQL DB (trusted network, more restricted)
+
+MongoDB (trusted network, must be locked down—common misconfig)
+
+Saleor Cloud (external SaaS, Trust Boundary #2)
+
+Static files served via WhiteNoise / CDN
+
+Boundaries to watch:
+
+Internet ⇄ Django
+
+Django ⇄ PostgreSQL
+
+Django ⇄ MongoDB
+
+Django ⇄ Saleor Cloud (GraphQL over internet)
+
+```
+---
+
 ## 📝 License
 This project is proprietary and not open-source.
 Contact the Eve team for licensing discussions.

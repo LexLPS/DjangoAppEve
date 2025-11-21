@@ -2,8 +2,7 @@ import requests
 from django.conf import settings
 
 SALEOR_GRAPHQL_URL = settings.SALEOR_GRAPHQL_URL
-SALEOR_CHANNEL = getattr(settings, "SALEOR_CHANNEL", "default-channel")
-
+SALEOR_CHANNEL = settings.SALEOR_CHANNEL
 
 class SaleorAPIError(RuntimeError):
     pass

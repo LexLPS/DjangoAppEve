@@ -1,8 +1,50 @@
 {% extends "base.html" %}
 
-{% block title %}Eve – Product Catalogue{% endblock %}
+{% block title %}Product Catalogue – Eve{% endblock %}
 
 {% block content %}
-    <h1>Product Catalogue</h1>
-    <p>This is the placeholder product catalogue page.</p>
+    <h1>VR Experiences Catalogue</h1>
+    <p>Explore Eve’s line of experiences designed for long-term patients.</p>
+
+    {% if saleor_error %}
+        <p style="color: red; margin-top: 10px;">
+            Error talking to Saleor: {{ saleor_error }}
+        </p>
+    {% endif %}
+
+    {% if products %}
+        <div style="display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px;">
+            {% for product in products %}
+                <div style="background: white; padding: 15px; border-radius: 8px; width: 260px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+                    {% if product.thumbnail and product.thumbnail.url %}
+                        <img src="{{ product.thumbnail.url }}" alt="{{ product.name }}" style="max-width: 100%; border-radius: 4px;">
+                    {% endif %}
+
+                    <h3 style="margin-top: 10px;">{{ product.name }}</h3>
+
+                    {% if product.pricing and product.pricing.priceRange and product.pricing.priceRange.start %}
+                        {% with price=product.pricing.priceRange.start.gross %}
+                            <p><strong>{{ price.amount }} {{ price.currency }}</strong></p>
+                        {% endwith %}
+                    {% endif %}
+
+                    {% if product.description %}
+                        <p style="font-size: 0.9em; color: #555;">
+                            {{ product.description|striptags|truncatechars:120 }}
+                        </p>
+                    {% endif %}
+
+                    <a href="{% url 'product_detail' product.slug %}"
+                    style="display:inline-block; margin-top:10px; padding:8px 12px; border:none;
+                            border-radius:4px; background:#20232a; color:white; text-decoration:none; cursor:pointer;">
+                        View details
+                    </a>
+                </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        {% if not saleor_error %}
+            <p>No products found for this channel yet.</p>
+        {% endif %}
+    {% endif %}
 {% endblock %}

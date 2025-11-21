@@ -81,8 +81,8 @@ WSGI_APPLICATION = 'eve.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
-SALEAOR_GRAPHQL_URL = "https://eve.eu.saleor.cloud/graphql"
-SALEOR_CHANNEL = "default-channel"
+SALEOR_GRAPHQL_URL = "https://eve.eu.saleor.cloud/graphql/"
+SALEOR_CHANNEL = "default-channel" 
 
 DATABASES = {
     "default": {

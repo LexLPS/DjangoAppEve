@@ -16,6 +16,11 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from accounts.api_views import ProfileViewSet
+
+router = DefaultRouter()
+router.register(r"profile", ProfileViewSet, basename="profile")
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -23,4 +28,6 @@ urlpatterns = [
     path("", include("core.urls")),
     path("shop/", include("ecommerce.urls")),
     path("payments/", include("payments.urls")),
+    path("api/", include(router.urls)),
 ]
+

@@ -1,5 +1,5 @@
 from django.contrib.auth import login, logout
-from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
+from django.contrib.auth.forms import AuthenticationForm
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from .forms import RegistrationForm
@@ -17,6 +17,10 @@ def register_view(request):
     return render(request, "accounts/register.html", {"form": form})
 
 def login_view(request):
+    # If user is already logged in, no need to show login form
+    if request.user.is_authenticated:
+        return redirect("landing")
+    
     if request.method == "POST":
         form = AuthenticationForm(request, data=request.POST)
         if form.is_valid():

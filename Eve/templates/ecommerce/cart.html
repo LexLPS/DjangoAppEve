@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Your Cart – Eve{% endblock %}
+
+{% block content %}
+    <h1>Your Cart</h1>
+
+    {% if items %}
+        <table style="width:100%; border-collapse:collapse; margin-top:20px;">
+            <thead>
+            <tr>
+                <th align="left">Product</th>
+                <th align="right">Price</th>
+                <th align="right">Qty</th>
+                <th align="right">Subtotal</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in items %}
+                <tr style="border-top:1px solid #ddd;">
+                    <td style="padding:8px;">
+                        {% if item.thumbnail_url %}
+                            <img src="{{ item.thumbnail_url }}" alt="" style="width:60px; vertical-align:middle; margin-right:10px;">
+                        {% endif %}
+                        {{ item.name }}
+                    </td>
+                    <td align="right" style="padding:8px;">
+                        {{ item.price_amount }} {{ item.price_currency }}
+                    </td>
+                    <td align="right" style="padding:8px;">
+                        {{ item.quantity }}
+                    </td>
+                    <td align="right" style="padding:8px;">
+                        {{ item.price_amount|floatformat:2|add:"0"|floatformat:2 }} × {{ item.quantity }} =
+                        {{ item.price_amount|floatformat:2|add:"0"|floatformat:2|floatformat }} <!-- simple, but you can compute in view -->
+                        {{ item.price_currency }}
+                    </td>
+                    <td align="right" style="padding:8px;">
+                        <form method="post" action="{% url 'remove_from_cart' item.product_id %}">
+                            {% csrf_token %}
+                            <button type="submit" style="border:none; background:none; color:red; cursor:pointer;">
+                                Remove
+                            </button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+
+        <p style="margin-top:20px; font-size:1.2em;">
+            <strong>Total: {{ total_amount|floatformat:2 }} {{ currency }}</strong>
+        </p>
+
+        <p>
+            <a href="{% url 'checkout' %}">Proceed to checkout</a>
+        </p>
+    {% else %}
+        <p>Your cart is empty.</p>
+    {% endif %}
+{% endblock %}

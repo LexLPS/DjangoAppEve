@@ -1,7 +1,10 @@
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import render, get_object_or_404, redirect
+from django.contrib.auth.decorators import login_required
+from django.views.decorators.http import require_POST
 from django.http import Http404
 from .services.mongo_client import products_collection
 from .services.saleor_client import fetch_products_from_saleor, fetch_product_by_slug, SaleorAPIError
+from .services.cart_service import get_cart, add_to_cart, remove_from_cart
 import sys
 
 
@@ -9,12 +12,12 @@ def product_catalogue_view(request):
     products = []
     saleor_error = None
 
-    # 1) Try Mongo cache first
+    #  Try Mongo cache first
     cached_products = list(products_collection.find().limit(50))
     if cached_products:
         products = cached_products
 
-    # 2) If no cache, try Saleor
+    #  If no cache, try Saleor
     if not products:
         try:
             products = fetch_products_from_saleor(first=20)
@@ -32,7 +35,7 @@ def product_catalogue_view(request):
             saleor_error = str(e)
             print("SALEOR ERROR:", e, file=sys.stderr)
 
-    # 3) If still nothing AND there was an error, use fallback mock data
+    #  If still nothing AND there was an error, use fallback mock data
     if not products and saleor_error is not None:
         products = [
             {
@@ -71,17 +74,17 @@ def product_catalogue_view(request):
 
 def product_detail_view(request, slug):
     try:
-        # 1) Try Mongo cache first
+        #  Try Mongo cache first
         cached = products_collection.find_one({"slug": slug})
         if cached:
             product = cached
         else:
-            # 2) Fetch from Saleor
+            #  Fetch from Saleor
             product = fetch_product_by_slug(slug)
             if product is None:
                 raise Http404("Product not found")
 
-            # 3) Cache in Mongo
+            #  Cache in Mongo
             products_collection.update_one(
                 {"id": product["id"]},
                 {"$set": product},
@@ -93,3 +96,57 @@ def product_detail_view(request, slug):
         raise Http404("Product not available at the moment")
 
     return render(request, "ecommerce/product_detail.html", {"product": product})
+
+@login_required
+def cart_view(request):
+    cart = get_cart(request.user.id)
+    items = cart["items"]
+
+    total_amount = 0
+    currency = None
+    for item in items:
+        total_amount += item["price_amount"] * item["quantity"]
+        currency = item["price_currency"]  # last one wins; assume same currency
+
+    context = {
+        "cart": cart,
+        "items": items,
+        "total_amount": total_amount,
+        "currency": currency,
+    }
+    return render(request, "ecommerce/cart.html", context)
+
+
+@login_required
+@require_POST
+def add_to_cart_view(request, slug):
+    quantity = int(request.POST.get("quantity", 1))
+
+    try:
+        # try cache
+        product = products_collection.find_one({"slug": slug})
+        if not product:
+            product = fetch_product_by_slug(slug)
+            if not product:
+                raise Http404("Product not found")
+
+            products_collection.update_one(
+                {"id": product["id"]},
+                {"$set": product},
+                upsert=True,
+            )
+
+        add_to_cart(request.user.id, product, quantity)
+
+    except SaleorAPIError as e:
+        print("SALEOR ERROR (add_to_cart):", e, file=sys.stderr)
+        # silently ignore for now or show message later
+
+    return redirect("cart")
+
+
+@login_required
+@require_POST
+def remove_from_cart_view(request, product_id):
+    remove_from_cart(request.user.id, product_id)
+    return redirect("cart")

@@ -28,16 +28,18 @@
                     {{ product.description|safe }}
                 </div>
             {% endif %}
-
-            <!-- Placeholder for future: add to cart -->
-            <form method="post" action="#">
-                {% csrf_token %}
-                <button type="submit"
-                        style="margin-top:20px; padding:10px 16px; border:none; border-radius:4px;
-                               background:#20232a; color:white; cursor:pointer;">
-                    Add to cart (coming soon)
-                </button>
-            </form>
+                <form method="post" action="{% url 'add_to_cart' product.slug %}">
+                    {% csrf_token %}
+                    <label>
+                        Quantity:
+                        <input type="number" name="quantity" value="1" min="1" style="width:60px;">
+                    </label>
+                    <button type="submit"
+                            style="margin-top:10px; padding:10px 16px; border:none; border-radius:4px;
+                                background:#20232a; color:white; cursor:pointer;">
+                        Add to cart
+                    </button>
+                </form>
 
             <p style="margin-top:15px;">
                 <a href="{% url 'product_catalogue' %}">← Back to catalogue</a>

@@ -1,21 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Eve – Experience Reality, Anywhere</title>
-</head>
-<body>
+{% extends "base.html" %}
+
+{% block title %}
+Eve – Experience Reality, Anywhere
+{% endblock %}
+
+{% block content %}
     <header>
         <h1>Welcome to Eve</h1>
         <p>Virtual reality experiences designed for long-term patients, beyond the hospital bed.</p>
-        <nav>
-            <a href="{% url 'landing' %}">Home</a>
-            <!-- These links will work once we add the pages -->
-            <!-- <a href="{% url 'product_catalogue' %}">Catalogue</a> -->
-            <!-- <a href="{% url 'login' %}">Login</a> -->
-            <!-- <a href="{% url 'register' %}">Register</a> -->
-            <!-- <a href="{% url 'contact' %}">Contact</a> -->
-        </nav>
     </header>
 
     <main>
@@ -27,5 +19,4 @@
             </p>
         </section>
     </main>
-</body>
-</html>
+{% endblock %}

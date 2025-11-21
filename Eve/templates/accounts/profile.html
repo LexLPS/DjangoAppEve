@@ -1,11 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Eve – Profile</title>
-</head>
-<body>
-    <h1>Your profile</h1>
-    <p>This is the placeholder profile page.</p>
-</body>
-</html>
+{% extends "base.html" %}
+
+{% block title %}Eve – Profile{% endblock %}
+
+{% block content %}
+    <h1>Your Eve Profile</h1>
+
+    <h2>Account info</h2>
+    <ul>
+        <li>Username: {{ request.user.username }}</li>
+        <li>Email: {{ request.user.email }}</li>
+    </ul>
+
+    <h2>Patient / VR details</h2>
+    <ul>
+        <li>Long-term patient: {{ profile.is_long_term_patient }}</li>
+        <li>Hospital: {{ profile.hospital_name|default:"-" }}</li>
+        <li>Room: {{ profile.room_number|default:"-" }}</li>
+        <li>Preferred VR mode: {{ profile.preferred_vr_mode|default:"-" }}</li>
+    </ul>
+
+    <p><a href="{% url 'landing' %}">Back to home</a></p>
+{% endblock %}

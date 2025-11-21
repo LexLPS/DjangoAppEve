@@ -2,16 +2,18 @@ from django.contrib.auth import login, logout
 from django.contrib.auth.forms import UserCreationForm, AuthenticationForm
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
+from .forms import RegistrationForm
+from .models import Profile
 
 def register_view(request):
     if request.method == "POST":
-        form = UserCreationForm(request.POST)
+        form = RegistrationForm(request.POST)
         if form.is_valid():
             user = form.save()
             login(request, user)
             return redirect("landing")
     else:
-        form = UserCreationForm()
+        form = RegistrationForm()
     return render(request, "accounts/register.html", {"form": form})
 
 def login_view(request):
@@ -32,5 +34,5 @@ def logout_view(request):
 
 @login_required
 def profile_view(request):
-    profile = getattr(request.user, "profile", None)
+    profile, created = Profile.objects.get_or_create(user=request.user)
     return render(request, "accounts/profile.html", {"profile": profile})

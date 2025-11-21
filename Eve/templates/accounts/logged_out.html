@@ -1,11 +1,15 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Eve – Logged Out</title>
-</head>
-<body>
-    <h1>You have been logged out</h1>
-    <p>This is the placeholder logged-out page.</p>
-</body>
-</html>
+{% extends "base.html" %}
+
+{% block title %}Eve – Logout{% endblock %}
+
+{% block content %}
+    <h1>Log out</h1>
+    <p>Are you sure you want to log out?</p>
+
+    <form method="post">
+        {% csrf_token %}
+        <button type="submit">Yes, log me out</button>
+    </form>
+
+    <p><a href="{% url 'landing' %}">Cancel and go back home</a></p>
+{% endblock %}

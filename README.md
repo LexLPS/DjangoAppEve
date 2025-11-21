@@ -193,7 +193,7 @@ You should be able to:
 
 ---
 
-## Threat Accessment:
+# Threat Accessment:
 
 ### High-Level Data Flow & Trust Boundaries
 ```
@@ -360,10 +360,10 @@ Threats
 
 Mitigations
 
-- Use Django ORM everywhere; avoid raw SQL when possible.
+- Use Django ORM everywhere; avoid raw SQL when possible. ✔
 - If you must use raw SQL, parameterize queries.
-- Separate DB user for Django with limited privileges; no superuser / owner where unnecessary.
-- Enforce strong DB auth and restrict network access to DB from app servers only.
+- Separate DB user for Django with limited privileges; no superuser / owner where unnecessary. ✔
+- Enforce strong DB auth and restrict network access to DB from app servers only. ✔
 - Regular backups + tested restore process (threat: ransomware / data loss).
 
 ### Shopping Cart & Checkout Flow
@@ -378,11 +378,11 @@ Threats
 
 Mitigations
 
-- Treat all pricing & discounts as server-side:
-  - On checkout: fetch product prices from trusted source (Saleor / DB) and ignore any client-supplied price.
-- For future payments (Stripe/Saleor):
-  - Use server-created payment intents; amount derived server-side.
-  - Validate payment webhook signatures and match to internal order IDs.
+- Treat all pricing & discounts as server-side: ✔
+  - On checkout: fetch product prices from trusted source (Saleor / DB) and ignore any client-supplied price. ✔
+- For future payments (Stripe/Saleor): 
+  - Use server-created payment intents; amount derived server-side. ✔
+  - Validate payment webhook signatures and match to internal order IDs. 
 - Limit max quantities per product per order and per cart.
 - Use one-time, time-limited order/checkout tokens.
 
@@ -404,7 +404,49 @@ Mitigations
   - Content-Security-Policy tuned to your static & media hosts.
 - Validate redirect targets (only internal paths, or strict allowlist).
 
-Configuration, Secrets, & Deployment
+### Configuration, Secrets, & Deployment
+
+ - Secrets leakage ✔
+  - `.env` accidentally committed  ✔
+
+
+- Security Misconfiguration (OWASP A02)
+
+   - `DEBUG=True` in production. ✔
+   - Misconfigured ALLOWED_HOSTS. ✔
+   - Un-hardened Gunicorn / reverse proxy settings.
+     
+ - Vulnerable or outdated components 
+  - Old Django/DRF/requests libraries with known CVEs (OWASP A06).
+
+
+Mitigations
+- Use environment variables + `.env` (already in README) and a proper secrets manager in production (AWS SSM, Vault, etc.). ✔
+- Separate dev vs prod settings modules:
+  - `DEBUG=False` in prod ✔
+  - Strong `SECRET_KEY` only set in prod environment ✔
+  - Correct `ALLOWED_HOSTS`, `SECURE_*` settings (HSTS, SSL redirect, etc.). ✔
+- Regular dependency scanning:
+  - `pip-audit`, `pip-tools`, Dependabot, or similar.
+- Containerize with minimal base image, non-root runtime user if using Docker.
+
+### Logging, Monitoring, & Incident Response
+
+Threats
+- Repudiation
+  - Users deny actions (e.g. “I never bought that VR experience”) and you can’t verify.
+- Delayed detection
+  - Attacks (brute-force, scraping, tampering) go unnoticed due to weak logging and no alerts.
+
+Mitigations
+- Log:
+  - Auth events (login success/fail, password reset, new devices).
+  - Cart changes, order creation, admin actions.
+  - Saleor API errors & anomalies.
+- Ensure logs contain:
+  - Timestamp, user ID (or anonymous marker), request path, IP (respecting privacy/reg laws).
+- Centralize logs & add detection:
+  - Threshold alerts on failed logins, unusual cart actions, etc.
 
 ---
 

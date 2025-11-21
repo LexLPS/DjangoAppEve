@@ -193,9 +193,9 @@ You should be able to:
 
 ---
 
-Threat Accessment:
+## Threat Accessment:
 
-High-Level Data Flow & Trust Boundaries
+### High-Level Data Flow & Trust Boundaries
 ```
 Conceptual DFD in text:
 
@@ -232,6 +232,180 @@ Django ⇄ MongoDB
 Django ⇄ Saleor Cloud (GraphQL over internet)
 
 ```
+---
+
+## STRIDE-Based Threats by Area
+
+### Grouped by component and call out risk + mitigations
+
+```
+
+### Threats
+
+- Spoofing / Account takeover
+  - Credential stuffing & password spraying.
+  - Weak password policy or no rate limiting on login.
+
+- Session hijacking
+  - Session IDs in non-Secure cookies, not HttpOnly, or too long-lived.
+
+- Broken auth flows (OWASP A07 – Authentication Failures)
+    -Cloudflare
+
+  - CSRF issues on login/logout/critical actions.
+  - Insecure password reset flow (guessable tokens, token reuse, no expiry).
+
+- Privilege escalation
+  - Normal user accessing staff/admin features (IDOR or missing permission checks).
+
+### Mitigations
+
+- Enforce strong password policy + password complexity & minimum length. (On-going)
+- Enable rate limiting on login & password reset (e.g. django-axes or custom throttling). (on-going)
+- Ensure Django Session / CSRF middleware enabled and correctly configured. ✔ 
+- Cookies: Secure, HttpOnly, SameSite=Lax or Strict where possible. (on-going, WIP)
+- Use Django’s built-in auth & permission system; restrict staff-only views with: ✔ 
+- @login_required, @permission_required, DRF IsAuthenticated, IsAdminUser etc. ✔ 
+
+Lock down password reset flows:
+- Random, single-use, short-lived tokens.
+- No leaking whether an email is registered (generic error messages).
+
+Optional: integrate 2FA for staff/admin accounts.
+
+```
+### Access Control & Multi-Tenancy (Patients vs Staff)
+Threats
+- Broken Access Control (OWASP A01)
+  - Users can access or modify others’ profiles, carts, or orders by guessing IDs.
+  - Patients can access staff/admin endpoints by manipulating URLs or form fields.
+  - Unprotected DRF endpoints returning sensitive lists (all users, all carts).
+
+Mitigations
+  
+- Always scope queries to the current user:
+  - Cart.objects.filter(user=request.user) rather than arbitrary IDs.
+
+- Use object-level permissions (DRF BasePermission / DjangoModelPermissions).
+
+- For staff/admin views, enforce:
+  - @user_passes_test(lambda u: u.is_staff) or role-based flags.
+
+- Perform access checks on the server (never trust client-side filtering).
+
+- Avoid exposing raw DB IDs when possible; use UUIDs or opaque identifiers.
+
+
+### Product Catalogue & Saleor GraphQL Integration
+Threats
+- Tampering / Data integrity
+  - Attacker hits Saleor directly or intercepts GraphQL traffic (if misconfigured) to manipulate product data your app trusts.
+  - Your app might trust unvalidated fields from Saleor, leading to HTML/JS injection in product descriptions.
+
+- Information disclosure
+  - Overly broad GraphQL queries exposing internal data.
+  - GraphQL introspection enabled in production, leak schema details.
+
+- DoS
+  - Expensive or nested GraphQL queries causing slowdowns in Saleor & your app.
+ 
+Mitigations
+
+- Enforce server-side validation/sanitization of any HTML from Saleor (e.g. bleach/allowlist) before rendering in templates.
+
+- Configure Saleor endpoint to require HTTPS and valid API token; rotate tokens periodically.
+
+- Limit GraphQL queries in your app:
+  - Fixed whitelisted queries instead of dynamically passing user-controlled query strings.
+
+- Enable GraphQL depth/complexity limiting on the Saleor side if possible.
+
+- Cache responses safely in MongoDB with validation of expected schema.
+
+
+### MongoDB:
+Threats
+
+- Data exposure
+  -MongoDB exposed directly to the internet (common misconfig).
+
+- Tampering
+  - If compromised, attacker can manipulate carts, change prices, etc.
+
+- Injection
+  - If user-supplied data is used directly in Mongo queries (NoSQL injection).
+
+Mitigations
+
+- Ensure MongoDB is not exposed publicly:
+  - Bind to internal network / localhost only.
+  - Use strong auth & network-level controls (VPC, security groups, firewall).
+
+- Treat cart & pricing as server-side trusted data:
+  - Cart items stored by product ID and quantity; never trust client-sent price.
+  - Recalculate price from Saleor/PostgreSQL on checkout.
+
+- Validate and sanitize all Mongo query parameters (no direct $where or unsanitized operators).
+- Use least privilege Mongo user (no admin on entire cluster).
+
+### PostgreSQL: User Accounts & Orders
+Threats
+
+  - SQL Injection (OWASP A05: Injection)
+  - Data exposure
+      - Direct DB compromise leaks user profiles, order history.
+
+- Tampering / integrity loss
+    - Attacker alters orders, entitlements, or user roles.
+
+Mitigations
+
+- Use Django ORM everywhere; avoid raw SQL when possible.
+- If you must use raw SQL, parameterize queries.
+- Separate DB user for Django with limited privileges; no superuser / owner where unnecessary.
+- Enforce strong DB auth and restrict network access to DB from app servers only.
+- Regular backups + tested restore process (threat: ransomware / data loss).
+
+### Shopping Cart & Checkout Flow
+Threats
+
+- Price manipulation
+  - Attacker changes price in client-side forms or API calls.
+- Quantity / stock abuse
+  - Cart holds unrealistic quantities, manipulating inventory or analytics.
+- Replay attacks
+  - Reusing old checkout URLs or tokens.
+
+Mitigations
+
+- Treat all pricing & discounts as server-side:
+  - On checkout: fetch product prices from trusted source (Saleor / DB) and ignore any client-supplied price.
+- For future payments (Stripe/Saleor):
+  - Use server-created payment intents; amount derived server-side.
+  - Validate payment webhook signatures and match to internal order IDs.
+- Limit max quantities per product per order and per cart.
+- Use one-time, time-limited order/checkout tokens.
+
+### Static Files, VR Media, and Content
+Threats
+
+- XSS & content injection
+  - User-entered content (names, messages, etc.) displayed without escaping.
+- Clickjacking
+  - App framed by attacker site, capturing user actions.
+- Open redirects
+  - Misused next parameters / redirect URLs.
+
+Mitigations
+
+- Escape output in templates by default (Django does this; avoid |safe unless absolutely necessary).
+- Add security headers:
+  - X-Frame-Options: `DENY` or `SAMEORIGIN`
+  - Content-Security-Policy tuned to your static & media hosts.
+- Validate redirect targets (only internal paths, or strict allowlist).
+
+Configuration, Secrets, & Deployment
+
 ---
 
 ## 📝 License

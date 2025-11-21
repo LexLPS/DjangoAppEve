@@ -29,5 +29,6 @@ urlpatterns = [
     path("shop/", include("ecommerce.urls")),
     path("payments/", include("payments.urls")),
     path("api/", include(router.urls)),
+    
 ]
 

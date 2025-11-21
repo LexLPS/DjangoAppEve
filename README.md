@@ -199,5 +199,4 @@ Contact the Eve team for licensing discussions.
 
 ---
 
-If you'd like, I can generate a **project banner**, **architecture diagram**, or **badges section** for GitHub!
 

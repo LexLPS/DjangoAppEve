@@ -18,6 +18,9 @@ def get_cart(user_id: int) -> dict:
     return cart
 
 
+MAX_ITEM_QUANTITY = 99
+
+
 def add_to_cart(user_id: int, product: dict, quantity: int = 1):
     cart = get_cart(user_id)
     items = cart["items"]
@@ -25,16 +28,18 @@ def add_to_cart(user_id: int, product: dict, quantity: int = 1):
     # see if product already in cart
     for item in items:
         if item["product_id"] == product["id"]:
-            item["quantity"] += quantity
+            item["quantity"] = min(item["quantity"] + quantity, MAX_ITEM_QUANTITY)
             break
     else:
-        # extract price (start gross) safely
-        price = None
-        currency = None
+        # extract price (start gross) safely; Saleor data is untrusted
         try:
             gross = product["pricing"]["priceRange"]["start"]["gross"]
             price = gross["amount"]
             currency = gross["currency"]
+            if isinstance(price, bool) or not isinstance(price, (int, float)):
+                raise ValueError("non-numeric price")
+            if not isinstance(currency, str) or not currency:
+                raise ValueError("invalid currency")
         except Exception:
             price = 0
             currency = "EUR"

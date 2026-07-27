@@ -1,10 +1,12 @@
 from django.shortcuts import render, redirect
 from django.contrib import messages
 from .forms import ContactForm
+from .throttling import rate_limit
 
 def landing_view(request):
     return render(request, "core/landing.html")
 
+@rate_limit("contact", limit=5, window_seconds=3600)
 def contact_view(request):
     if request.method == "POST":
         form = ContactForm(request.POST)
@@ -15,6 +17,3 @@ def contact_view(request):
     else:
         form = ContactForm()
     return render(request, "core/contact.html", {"form": form})
-
-def landing_view(request):
-    return render(request, "core/landing.html")

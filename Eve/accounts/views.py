@@ -2,9 +2,11 @@ from django.contrib.auth import login, logout
 from django.contrib.auth.forms import AuthenticationForm
 from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
+from core.throttling import rate_limit
 from .forms import RegistrationForm
 from .models import Profile
 
+@rate_limit("register", limit=5, window_seconds=3600)
 def register_view(request):
     if request.method == "POST":
         form = RegistrationForm(request.POST)
@@ -16,6 +18,7 @@ def register_view(request):
         form = RegistrationForm()
     return render(request, "accounts/register.html", {"form": form})
 
+@rate_limit("login", limit=5, window_seconds=300)
 def login_view(request):
     # If user is already logged in, no need to show login form
     if request.user.is_authenticated:

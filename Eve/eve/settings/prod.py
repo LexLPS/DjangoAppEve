@@ -1,4 +1,4 @@
-from decouple import config, Csv
+from decouple import Csv, config
 from django.core.exceptions import ImproperlyConfigured
 
 from .base import *
@@ -85,6 +85,11 @@ EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
+
+# TLS terminates at the reverse proxy; trust its X-Forwarded-Proto so
+# request.is_secure() is correct. Only safe because the proxy overwrites
+# the header on every request (see docs/DEPLOYMENT.md).
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 SECURE_SSL_REDIRECT = True
 SESSION_COOKIE_SECURE = True

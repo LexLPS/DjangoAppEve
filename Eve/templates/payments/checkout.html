@@ -15,9 +15,7 @@
             <p>The final total is calculated at order time.</p>
             <form method="post">
                 {% csrf_token %}
-                <button type="submit"
-                        style="padding:10px 16px; border:none; border-radius:4px;
-                               background:#20232a; color:white; cursor:pointer;">
+                <button type="submit" class="btn">
                     Place order
                 </button>
             </form>

@@ -7,8 +7,7 @@ display-only and never trusted for billing.
 import logging
 
 from django.conf import settings
-
-from ecommerce.services.saleor_client import saleor_graphql, SaleorAPIError
+from ecommerce.services.saleor_client import SaleorAPIError, saleor_graphql
 
 logger = logging.getLogger(__name__)
 
@@ -72,18 +71,23 @@ def create_checkout(email: str, cart_items: list) -> dict:
     lines = build_lines(cart_items)
 
     try:
+        # retry=False: mutations are not idempotent and must never auto-retry
         data = saleor_graphql(CHECKOUT_CREATE_MUTATION, {
             "channel": settings.SALEOR_CHANNEL,
             "email": email,
             "lines": lines,
-        })
+        }, retry=False)
     except SaleorAPIError:
         logger.exception("Saleor checkoutCreate failed")
-        raise CheckoutError("Checkout is temporarily unavailable. Please try again later.")
+        raise CheckoutError("Checkout is temporarily unavailable. Please try again later.") from None
 
     payload = data["checkoutCreate"]
     if payload["errors"]:
-        logger.error("Saleor checkoutCreate errors: %s", payload["errors"])
+        # Log field/code only — error messages may echo user input
+        logger.error(
+            "Saleor checkoutCreate errors: %s",
+            [(e.get("field"), e.get("code")) for e in payload["errors"]],
+        )
         raise CheckoutError(
             "Some items in your cart are unavailable. Please review your cart."
         )
@@ -103,14 +107,19 @@ def complete_checkout(checkout_id: str) -> dict:
     side; the resulting order starts as pending locally and is promoted by
     signature-verified webhooks."""
     try:
-        data = saleor_graphql(CHECKOUT_COMPLETE_MUTATION, {"id": checkout_id})
+        data = saleor_graphql(CHECKOUT_COMPLETE_MUTATION, {"id": checkout_id}, retry=False)
     except SaleorAPIError:
         logger.exception("Saleor checkoutComplete failed")
-        raise CheckoutError("Checkout could not be completed. You have not been charged.")
+        raise CheckoutError(
+            "Checkout could not be completed. You have not been charged."
+        ) from None
 
     payload = data["checkoutComplete"]
     if payload["errors"]:
-        logger.error("Saleor checkoutComplete errors: %s", payload["errors"])
+        logger.error(
+            "Saleor checkoutComplete errors: %s",
+            [(e.get("field"), e.get("code")) for e in payload["errors"]],
+        )
         raise CheckoutError("Checkout could not be completed. You have not been charged.")
 
     order = payload["order"]

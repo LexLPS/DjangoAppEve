@@ -1,9 +1,10 @@
 import logging
 
+from django.contrib import messages
 from django.db import connection
 from django.http import JsonResponse
-from django.shortcuts import render, redirect
-from django.contrib import messages
+from django.shortcuts import redirect, render
+
 from .forms import ContactForm
 from .throttling import rate_limit
 

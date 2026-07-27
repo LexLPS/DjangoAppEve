@@ -6,22 +6,22 @@
     <h1>Your payment history</h1>
 
     {% if orders %}
-        <table style="width:100%; border-collapse:collapse; background:white; border-radius:8px; overflow:hidden;">
+        <table class="data-table">
             <thead>
-                <tr style="background:#20232a; color:white; text-align:left;">
-                    <th style="padding:10px;">Order</th>
-                    <th style="padding:10px;">Date</th>
-                    <th style="padding:10px;">Total</th>
-                    <th style="padding:10px;">Status</th>
+                <tr>
+                    <th>Order</th>
+                    <th>Date</th>
+                    <th>Total</th>
+                    <th>Status</th>
                 </tr>
             </thead>
             <tbody>
                 {% for order in orders %}
-                    <tr style="border-top:1px solid #eee;">
-                        <td style="padding:10px;">{{ order.saleor_order_id }}</td>
-                        <td style="padding:10px;">{{ order.created_at|date:"Y-m-d H:i" }}</td>
-                        <td style="padding:10px;">{{ order.total_amount }} {{ order.currency }}</td>
-                        <td style="padding:10px;">{{ order.status }}</td>
+                    <tr>
+                        <td>{{ order.saleor_order_id }}</td>
+                        <td>{{ order.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ order.total_amount }} {{ order.currency }}</td>
+                        <td>{{ order.get_status_display }}</td>
                     </tr>
                 {% endfor %}
             </tbody>

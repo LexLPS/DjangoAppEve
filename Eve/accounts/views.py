@@ -1,5 +1,6 @@
 import logging
 
+from core.throttling import rate_limit
 from django.contrib import messages
 from django.contrib.auth import login, logout
 from django.contrib.auth.decorators import login_required
@@ -8,11 +9,10 @@ from django.contrib.auth.models import User
 from django.core import signing
 from django.core.cache import cache
 from django.core.mail import send_mail
-from django.shortcuts import render, redirect
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_POST
 
-from core.throttling import rate_limit
 from .forms import RegistrationForm
 from .models import Profile
 

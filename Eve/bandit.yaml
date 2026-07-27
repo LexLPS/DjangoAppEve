@@ -1,0 +1,13 @@
+# Bandit configuration (security static analysis in CI).
+# CI runs with -ll (medium+ severity fails the build). The low-severity
+# findings are reviewed false positives: test fixtures flagged as hardcoded
+# passwords (B105/B106), the email-token signing salt (a salt, not a
+# password), non-cryptographic backoff jitter (B311), and the deliberate
+# swallow in the circuit-breaker success path (B110).
+exclude_dirs:
+  - venv
+  - staticfiles
+
+skips:
+  # B101 assert_used: Django tests rely on assertions by design
+  - B101

@@ -11,7 +11,8 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-from decouple import config, Csv
+
+from decouple import Csv, config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -53,6 +54,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'core.middleware.TrustedProxyMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'core.middleware.SecurityHeadersMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -170,14 +172,41 @@ DATABASES = {
         "PASSWORD": config("DB_PASSWORD", default="password"),
         "HOST": config("DB_HOST", default="localhost"),
         "PORT": config("DB_PORT", default="5432"),
+        # Persistent connections with health checks; put PgBouncer in front
+        # when worker count × CONN_MAX_AGE pressure approaches max_connections
+        "CONN_MAX_AGE": config("DB_CONN_MAX_AGE", default=60, cast=int),
+        "CONN_HEALTH_CHECKS": True,
     }
 }
 MONGODB = {
     "HOST": config("MONGODB_URI", default="mongodb://localhost:27017"),
-    "DB_NAME": config("MONGODB_DB_NAME", default="EVEDB")
+    "DB_NAME": config("MONGODB_DB_NAME", default="EVEDB"),
+    "MAX_POOL_SIZE": config("MONGODB_MAX_POOL_SIZE", default=50, cast=int),
 }
 
+# Reverse proxies whose X-Forwarded-For may be trusted for the client IP
+# (rate limiting, admin allowlist). Empty = direct connections only.
+TRUSTED_PROXIES = config("DJANGO_TRUSTED_PROXIES", default="", cast=Csv())
+
+# --- Request size limits: bots and abuse, not legitimate form traffic
+DATA_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024   # 1 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 200
+
 REST_FRAMEWORK = {
+    # Explicit: session auth only (no basic auth), authenticated by default,
+    # JSON only — the browsable API is re-enabled in dev.py
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+    ],
+    "DEFAULT_RENDERER_CLASSES": [
+        "rest_framework.renderers.JSONRenderer",
+    ],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
@@ -245,6 +274,7 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [BASE_DIR / "static"]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

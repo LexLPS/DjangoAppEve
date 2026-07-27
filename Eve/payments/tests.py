@@ -223,6 +223,96 @@ class OrderOwnershipTests(TestCase):
         self.assertNotContains(response, "SO_BOB_1")
 
 
+@override_settings(CHECKOUT_ENABLED=True, SALEOR_WEBHOOK_SECRET=WEBHOOK_SECRET)
+class EndToEndOrderJourneyTests(TestCase):
+    """Full journey with Saleor and Mongo mocked at the service boundary:
+    register -> add to cart -> checkout -> webhook payment -> paid history,
+    plus the refund and duplicate-delivery paths."""
+
+    def setUp(self):
+        cache.clear()
+
+    def _register_and_login(self):
+        self.client.post(reverse("register"), {
+            "username": "carol", "email": "carol@example.com",
+            "password1": "S3curePass!x", "password2": "S3curePass!x",
+        })  # register logs the user in
+
+    def test_full_purchase_refund_and_redelivery(self):
+        self._register_and_login()
+        user = User.objects.get(username="carol")
+
+        product = {
+            "id": "P1", "name": "Eve Horizon", "slug": "eve-horizon",
+            "defaultVariant": {"id": "V1"},
+            "pricing": {"priceRange": {"start": {"gross": {
+                "amount": 49.99, "currency": "EUR"}}}},
+        }
+        cart = {"user_id": user.id, "items": [{
+            "product_id": "P1", "slug": "eve-horizon", "name": "Eve Horizon",
+            "variant_id": "V1", "price_amount": 49.99,
+            "price_currency": "EUR", "quantity": 1,
+        }]}
+
+        # Add to cart (product lookup and cart storage mocked)
+        with patch("ecommerce.views.get_cached_product", return_value=product), \
+             patch("ecommerce.views.add_to_cart") as add_mock:
+            response = self.client.post(
+                reverse("add_to_cart", args=["eve-horizon"]), {"quantity": "1"})
+            self.assertRedirects(response, reverse("cart"),
+                                 fetch_redirect_response=False)
+            add_mock.assert_called_once()
+
+        # Checkout with Saleor-calculated total
+        with patch("payments.views.get_cart", return_value=cart), \
+             patch("payments.views.clear_cart") as clear_mock, \
+             patch("payments.views.create_checkout",
+                   return_value={"checkout_id": "CHK1", "total_amount": 49.99,
+                                 "total_currency": "EUR"}), \
+             patch("payments.views.complete_checkout",
+                   return_value={"order_id": "ORD-E2E", "total_amount": 49.99,
+                                 "total_currency": "EUR"}):
+            self.client.get(reverse("checkout"))
+            response = self.client.post(reverse("checkout"))
+            self.assertRedirects(response, reverse("payment_history"),
+                                 fetch_redirect_response=False)
+            clear_mock.assert_called_once_with(user.id)
+
+        order = Order.objects.get(saleor_order_id="ORD-E2E")
+        self.assertEqual(order.status, Order.Status.PENDING)
+
+        # Payment webhook arrives (twice — duplicate delivery must be a no-op)
+        payload = {"event_type": "order_fully_paid", "order": {"id": "ORD-E2E"}}
+        body, signature = _signed(payload)
+        for _ in range(2):
+            response = self.client.post(
+                reverse("saleor_webhook"), data=body,
+                content_type="application/json",
+                headers={"Saleor-Signature": signature},
+            )
+            self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        self.assertEqual(Order.objects.count(), 1)
+
+        # History shows the paid order
+        response = self.client.get(reverse("payment_history"))
+        self.assertContains(response, "ORD-E2E")
+        self.assertContains(response, "Paid")
+
+        # Refund webhook completes the lifecycle
+        body, signature = _signed(
+            {"event_type": "order_refunded", "order": {"id": "ORD-E2E"}})
+        response = self.client.post(
+            reverse("saleor_webhook"), data=body,
+            content_type="application/json",
+            headers={"Saleor-Signature": signature},
+        )
+        self.assertEqual(response.status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.REFUNDED)
+
+
 @skipUnless(os.environ.get("SALEOR_INTEGRATION") == "1",
             "Set SALEOR_INTEGRATION=1 with a configured Saleor instance")
 class SaleorIntegrationTests(TestCase):
@@ -244,6 +334,7 @@ class SaleorIntegrationTests(TestCase):
 
     def test_checkout_created_with_server_side_prices(self):
         from ecommerce.services.saleor_client import fetch_products_from_saleor
+
         from .services.saleor_checkout import create_checkout
         product = fetch_products_from_saleor(first=1)[0]
         items = [{"variant_id": product["defaultVariant"]["id"], "quantity": 1}]

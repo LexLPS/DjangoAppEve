@@ -3,7 +3,7 @@ import re
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
-from django.test import TestCase
+from django.test import Client, TestCase
 from django.urls import reverse
 
 from .models import Profile
@@ -85,6 +85,32 @@ class LogoutTests(TestCase):
         response = self.client.post(reverse("logout"))
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_logout_post_without_csrf_token_rejected(self):
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.force_login(self.user)
+        response = csrf_client.post(reverse("logout"))
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("_auth_user_id", csrf_client.session)  # still logged in
+
+
+class SessionFixationTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+
+    def test_session_key_rotates_on_login(self):
+        # Establish a pre-login session an attacker could have planted
+        session = self.client.session
+        session["planted"] = True
+        session.save()
+        key_before = session.session_key
+
+        response = self.client.post(
+            reverse("login"), {"username": "alice", "password": "S3curePass!x"}
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertNotEqual(self.client.session.session_key, key_before)
 
 
 class AccountLockoutTests(TestCase):
@@ -214,12 +240,20 @@ class ObjectOwnershipTests(TestCase):
         self.client.force_login(self.alice)
         response = self.client.get("/api/profile/")
         self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(len(data), 1)
-        self.assertEqual(data[0]["user"]["username"], "alice")
+        data = response.json()  # paginated envelope
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(len(data["results"]), 1)
+        self.assertEqual(data["results"][0]["user"]["username"], "alice")
         self.assertNotContains(response, "Charité")
 
     def test_api_denies_access_to_other_users_profile(self):
         self.client.force_login(self.alice)
         response = self.client.get(f"/api/profile/{self.bob_profile.pk}/")
         self.assertEqual(response.status_code, 404)
+
+    def test_api_rejects_write_methods(self):
+        self.client.force_login(self.alice)
+        response = self.client.post("/api/profile/", {"hospital_name": "X"})
+        self.assertEqual(response.status_code, 405)  # read-only viewset
+        response = self.client.delete(f"/api/profile/{self.alice_profile.pk}/")
+        self.assertEqual(response.status_code, 405)

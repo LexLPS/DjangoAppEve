@@ -25,7 +25,7 @@ class Command(BaseCommand):
         try:
             user = User.objects.get(username=options["username"])
         except User.DoesNotExist:
-            raise CommandError(f"User {options['username']!r} does not exist.")
+            raise CommandError(f"User {options['username']!r} does not exist.") from None
 
         user_id = user.id
         with transaction.atomic():

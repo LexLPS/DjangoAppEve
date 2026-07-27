@@ -18,7 +18,7 @@ class Command(BaseCommand):
         try:
             user = User.objects.get(username=options["username"])
         except User.DoesNotExist:
-            raise CommandError(f"User {options['username']!r} does not exist.")
+            raise CommandError(f"User {options['username']!r} does not exist.") from None
 
         device, created = TOTPDevice.objects.get_or_create(
             user=user, name="default", defaults={"confirmed": True}

@@ -1,7 +1,7 @@
+from core.throttling import rate_limit
 from django.contrib.auth import views as auth_views
 from django.urls import path
 
-from core.throttling import rate_limit
 from . import views
 
 urlpatterns = [

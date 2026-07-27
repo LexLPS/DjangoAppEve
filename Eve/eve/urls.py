@@ -14,13 +14,13 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
-from django.conf import settings
-from django.contrib import admin
-from django.urls import path, include
-from django_otp.admin import OTPAdminSite
-from rest_framework.routers import DefaultRouter
 from accounts.api_views import ProfileViewSet
 from core.throttling import rate_limit
+from django.conf import settings
+from django.contrib import admin
+from django.urls import include, path
+from django_otp.admin import OTPAdminSite
+from rest_framework.routers import DefaultRouter
 
 router = DefaultRouter()
 router.register(r"profile", ProfileViewSet, basename="profile")

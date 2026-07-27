@@ -1,0 +1,15 @@
+target-version = "py313"
+line-length = 100
+
+extend-exclude = [
+    "Eve/venv",
+    "**/migrations/*",
+]
+
+[lint]
+# Explicit rule set: pycodestyle errors, pyflakes, bugbear, import sort
+select = ["E4", "E7", "E9", "F", "B", "I"]
+
+[lint.per-file-ignores]
+# Django settings modules compose via star imports by design
+"Eve/eve/settings/*" = ["F403", "F405"]

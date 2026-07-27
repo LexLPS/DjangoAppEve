@@ -1,11 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
-from pymongo import MongoClient
 from django.conf import settings
+from pymongo import MongoClient
 
 # Bounded server selection so health checks and requests fail fast when
-# MongoDB is down instead of hanging for the 30s driver default
-client = MongoClient(settings.MONGODB["HOST"], serverSelectionTimeoutMS=5000)
+# MongoDB is down instead of hanging for the 30s driver default; pool size
+# is capped per process (size Mongo's max connections to workers × pool)
+client = MongoClient(
+    settings.MONGODB["HOST"],
+    serverSelectionTimeoutMS=5000,
+    maxPoolSize=settings.MONGODB.get("MAX_POOL_SIZE", 50),
+    waitQueueTimeoutMS=2000,
+)
 mongo_db = client[settings.MONGODB["DB_NAME"]]
 
 products_collection = mongo_db["products_cache"]

@@ -12,8 +12,8 @@ from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-
 from ecommerce.services.cart_service import clear_cart, get_cart
+
 from .models import Order
 from .services.saleor_checkout import CheckoutError, complete_checkout, create_checkout
 

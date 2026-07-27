@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from django.contrib.auth.models import User
 from django.core.cache import cache
@@ -125,6 +125,45 @@ class CartInputValidationTests(TestCase):
             response = self.client.post(reverse("remove_from_cart", args=["prod-1"]))
         self.assertRedirects(response, reverse("cart"), fetch_redirect_response=False)
         remove.assert_called_once_with(self.user.id, "prod-1")
+
+
+class AtomicCartServiceTests(TestCase):
+    """Cart mutations must be single atomic Mongo operators, never
+    read-modify-write cycles that can lose concurrent updates."""
+
+    def _run_add(self, matched_existing: bool):
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.update_one.return_value = MagicMock(
+                matched_count=1 if matched_existing else 0
+            )
+            from .services.cart_service import add_to_cart
+            add_to_cart(7, make_product(), quantity=2)
+        return coll
+
+    def test_existing_item_uses_atomic_increment(self):
+        coll = self._run_add(matched_existing=True)
+        first_update = coll.update_one.call_args_list[0]
+        self.assertIn("$inc", first_update.args[1])
+        # No $push happened — only the $inc and the quantity clamp
+        operators = [list(call.args[1].keys()) for call in coll.update_one.call_args_list]
+        self.assertFalse(any("$push" in ops for ops in operators))
+
+    def test_new_item_uses_guarded_push(self):
+        coll = self._run_add(matched_existing=False)
+        push_call = coll.update_one.call_args_list[1]
+        self.assertIn("$push", push_call.args[1])
+        # The filter guards against a concurrent push of the same product
+        self.assertEqual(push_call.args[0]["items.product_id"], {"$ne": "UHJvZHVjdDox"})
+        pushed = push_call.args[1]["$push"]["items"]
+        self.assertEqual(pushed["variant_id"], None)  # no defaultVariant in fixture
+
+    def test_remove_uses_atomic_pull(self):
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            from .services.cart_service import remove_from_cart
+            remove_from_cart(7, "P1")
+        update = coll.update_one.call_args
+        self.assertIn("$pull", update.args[1])
+        self.assertEqual(update.args[1]["$pull"]["items"], {"product_id": "P1"})
 
 
 class CartRobustnessTests(TestCase):

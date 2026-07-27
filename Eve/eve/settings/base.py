@@ -11,7 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-from decouple import config
+from decouple import config, Csv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -41,6 +41,9 @@ INSTALLED_APPS = [
     
     # Third-party
     "rest_framework",
+    "django_otp",
+    "django_otp.plugins.otp_totp",
+    "django_otp.plugins.otp_static",
 
     # Our apps
     "core",
@@ -56,12 +59,22 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django_otp.middleware.OTPMiddleware',
+    'core.middleware.AdminIPAllowlistMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
 # Admin is served from a configurable, non-default path in production
 ADMIN_URL = config("DJANGO_ADMIN_URL", default="admin/")
+
+# When True the admin login additionally requires a one-time password
+# (django-otp TOTP). Enabled by default in production settings.
+ADMIN_REQUIRE_MFA = config("DJANGO_ADMIN_REQUIRE_MFA", default=False, cast=bool)
+
+# Comma-separated IPs allowed to reach the admin. Empty disables the check
+# (use when the admin is protected by VPN/SSO at the proxy instead).
+ADMIN_ALLOWED_IPS = config("DJANGO_ADMIN_ALLOWED_IPS", default="", cast=Csv())
 
 # --- Explicit cookie policy (secure flags are set in prod.py) ---
 SESSION_COOKIE_HTTPONLY = True          # JS must never read the session
@@ -99,8 +112,55 @@ SALEOR_GRAPHQL_URL = config("SALEOR_GRAPHQL_URL", default="")
 SALEOR_CHANNEL = config("SALEOR_CHANNEL", default="default-channel")
 SALEOR_API_TOKEN = config("SALEOR_API_TOKEN", default="")
 
+# Shared secret for verifying Saleor webhook signatures (HMAC-SHA256)
+SALEOR_WEBHOOK_SECRET = config("SALEOR_WEBHOOK_SECRET", default="")
+
+# Checkout stays disabled until the Saleor integration tests pass against a
+# real instance (see payments/tests.py::SaleorIntegrationTests). Flip only
+# after that, and only with SALEOR_WEBHOOK_SECRET configured.
+CHECKOUT_ENABLED = config("CHECKOUT_ENABLED", default=False, cast=bool)
+
 # How long Mongo-cached Saleor products stay fresh before re-fetching
 PRODUCT_CACHE_TTL_SECONDS = config("PRODUCT_CACHE_TTL_SECONDS", default=3600, cast=int)
+
+# --- Cache / sessions: Redis when REDIS_URL is set, else per-process memory.
+# Production requires REDIS_URL (prod.py) so rate limits, lockouts, and
+# sessions are shared across workers.
+REDIS_URL = config("REDIS_URL", default="")
+
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+            "OPTIONS": {
+                # Passed through to redis.ConnectionPool
+                "max_connections": config("REDIS_MAX_CONNECTIONS", default=50, cast=int),
+                "socket_connect_timeout": 2,
+                "socket_timeout": 2,
+                "retry_on_timeout": True,
+            },
+            "TIMEOUT": 300,
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        }
+    }
+
+# cached_db: reads served from Redis, writes mirrored to PostgreSQL, so a
+# Redis flush/eviction/failover never logs users out. PostgreSQL stays the
+# authoritative store for sessions, orders, and payments.
+SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+
+# --- Email (password reset, email verification). Console backend by default;
+# production configures SMTP in prod.py.
+EMAIL_BACKEND = config(
+    "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
+)
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@localhost")
 
 DATABASES = {
     "default": {

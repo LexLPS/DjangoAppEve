@@ -36,7 +36,9 @@ Two databases hold state; both need backups.
   - **Test restores quarterly** — an untested backup is not a backup:
     `pg_restore --dbname=eve_restore_test <dumpfile>`, then spot-check row
     counts for `auth_user`, `accounts_profile`, `payments_order`.
-- **MongoDB** (carts, product cache):
+- **MongoDB** (carts, product cache) — run `python manage.py ensure_indexes`
+  at every deploy (idempotent; creates the unique cart index the atomic
+  upserts rely on):
   - Product cache is disposable (repopulates from Saleor) — no backup needed.
   - Carts are convenience data: nightly `mongodump --db EVEDB
     --collection carts` is sufficient; losing a day of carts is acceptable,
@@ -46,18 +48,67 @@ Two databases hold state; both need backups.
   backup is useless if `DJANGO_SECRET_KEY` is lost — active sessions and
   password-reset tokens are invalidated when it changes.
 
+## Redis
+
+Redis backs the Django cache, rate-limit/lockout counters, and cached
+sessions. It is **required in production** (`REDIS_URL`, `redis://` or
+`rediss://` — prefer TLS for anything crossing a network boundary).
+
+- **Authoritative data lives elsewhere:** PostgreSQL holds orders, payments,
+  users, and the session source of truth (`cached_db` engine); Redis is an
+  accelerator. Losing Redis loses nothing permanent.
+- **Connection limits/timeouts** (set in settings): pool capped at
+  `REDIS_MAX_CONNECTIONS` (default 50) per worker; 2 s connect and socket
+  timeouts with retry-on-timeout. Size `maxclients` on the server above
+  `workers × pool size`.
+- **Eviction policy:** set `maxmemory` and `maxmemory-policy volatile-lru`.
+  All app keys carry TTLs; `volatile-lru` evicts only expiring keys, so a
+  full cache degrades gracefully instead of erroring. Do not use
+  `allkeys-random`.
+- **Failover:** use a managed HA Redis or Sentinel. The app fails safe
+  without it: sessions fall back to PostgreSQL reads, and rate limiting
+  fails open with loud `Rate-limit cache unavailable` error logs — alert on
+  that message, because brute-force protection is reduced while it fires.
+
+## Checkout enablement runbook
+
+Checkout ships **disabled** (`CHECKOUT_ENABLED=False`). Enable it only after
+all of the following, in order:
+
+1. Configure `SALEOR_GRAPHQL_URL`, `SALEOR_API_TOKEN`, and channel against
+   the production Saleor instance.
+2. Create a Saleor webhook for order events (fully paid, payment failed,
+   refunded, cancelled) pointing at `/payments/webhooks/saleor/` with a
+   strong `secretKey`; set the same value as `SALEOR_WEBHOOK_SECRET`.
+3. Run the integration suite against that instance and require green:
+   `SALEOR_INTEGRATION=1 python manage.py test payments`
+4. Set `CHECKOUT_ENABLED=True` (production refuses this without the webhook
+   secret) and verify one real end-to-end order, its webhook state change to
+   `paid`, and a refund round-trip before announcing availability.
+
 ## Admin protection
 
 - Set `DJANGO_ADMIN_URL` to a non-obvious path in production (e.g.
   `manage-eve-8c1f/`). This is obscurity, not security — it cuts scanner
   noise; the real controls are below.
+- **MFA is mandatory in production** (`ADMIN_REQUIRE_MFA`, default on): the
+  admin login demands a TOTP token. Bootstrap: create the first device with
+  `python manage.py provision_totp <username>` (prints an otpauth:// URL and
+  QR to scan). A locked-out admin gets a new device the same way via shell
+  access — never by disabling MFA globally.
 - Admin login is rate-limited (5 attempts / 5 min / IP) in code.
-- Restrict the admin path by IP allowlist or VPN at the reverse proxy where
-  possible.
+- **Network restriction — pick at least one:** VPN or SSO gateway in front of
+  the admin path at the reverse proxy (preferred), or the built-in allowlist
+  via `DJANGO_ADMIN_ALLOWED_IPS` (comma-separated; unlisted IPs get 404).
+  The allowlist checks `REMOTE_ADDR`, so the proxy must pass real client IPs.
 - Admin accounts: unique per person (no shared logins), strong passwords,
   `is_superuser` only where unavoidable — content managers get scoped
-  permissions via groups. Review the account list quarterly; disable accounts
-  on offboarding the same day.
+  permissions via groups.
+- **Quarterly access review:** run `python manage.py audit_admins` — it lists
+  every staff/superuser account with last login, active state, and MFA device
+  count. Remove stale privileges, deactivate departed users (same day as
+  offboarding), and provision MFA for any admin flagged `NO MFA DEVICE`.
+  Record the review date and outcome.
 
 ## Privacy procedures
 

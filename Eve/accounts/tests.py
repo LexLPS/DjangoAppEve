@@ -1,4 +1,7 @@
+import re
+
 from django.contrib.auth.models import User
+from django.core import mail
 from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
@@ -63,6 +66,139 @@ class AuthenticationTests(TestCase):
         for _ in range(5):
             self.client.post(reverse("register"), {})
         response = self.client.post(reverse("register"), {})
+        self.assertEqual(response.status_code, 429)
+
+
+class LogoutTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+
+    def test_logout_get_rejected(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("logout"))
+        self.assertEqual(response.status_code, 405)
+        self.assertIn("_auth_user_id", self.client.session)  # still logged in
+
+    def test_logout_post_ends_session(self):
+        self.client.force_login(self.user)
+        response = self.client.post(reverse("logout"))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+
+class AccountLockoutTests(TestCase):
+    """Per-username lockout: credential stuffing across many IPs still locks
+    the targeted account, independently of the per-IP throttle."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+
+    def _fail_from(self, ip):
+        return self.client.post(
+            reverse("login"),
+            {"username": "alice", "password": "wrong"},
+            REMOTE_ADDR=ip,
+        )
+
+    def test_lockout_after_distributed_failures(self):
+        # 10 failures from 10 different IPs — per-IP throttle never trips
+        for i in range(10):
+            response = self._fail_from(f"198.51.100.{i}")
+            self.assertEqual(response.status_code, 200)
+        # Even the CORRECT password from a fresh IP is now refused
+        response = self.client.post(
+            reverse("login"),
+            {"username": "alice", "password": "S3curePass!x"},
+            REMOTE_ADDR="203.0.113.99",
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_successful_login_clears_failure_count(self):
+        for i in range(5):
+            self._fail_from(f"198.51.100.{i}")
+        response = self.client.post(
+            reverse("login"),
+            {"username": "alice", "password": "S3curePass!x"},
+            REMOTE_ADDR="203.0.113.1",
+        )
+        self.assertEqual(response.status_code, 302)  # logged in
+        self.client.post(reverse("logout"))
+        # Counter was reset — five more failures don't lock yet
+        for i in range(5):
+            response = self._fail_from(f"198.51.100.{100 + i}")
+            self.assertEqual(response.status_code, 200)
+
+
+class EmailVerificationTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def _register(self):
+        return self.client.post(reverse("register"), {
+            "username": "carol",
+            "email": "carol@example.com",
+            "password1": "S3curePass!x",
+            "password2": "S3curePass!x",
+        })
+
+    def test_registration_sends_verification_email(self):
+        self._register()
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("carol@example.com", mail.outbox[0].to)
+        self.assertIn("/accounts/verify-email/", mail.outbox[0].body)
+
+    def test_verification_link_marks_email_verified(self):
+        self._register()
+        match = re.search(r"(/accounts/verify-email/[^\s]+)", mail.outbox[0].body)
+        self.assertIsNotNone(match)
+        response = self.client.get(match.group(1))
+        self.assertEqual(response.status_code, 200)
+        profile = Profile.objects.get(user__username="carol")
+        self.assertTrue(profile.email_verified)
+
+    def test_tampered_token_rejected(self):
+        self._register()
+        response = self.client.get("/accounts/verify-email/forged-token/")
+        self.assertEqual(response.status_code, 400)
+        profile = Profile.objects.get(user__username="carol")
+        self.assertFalse(profile.email_verified)
+
+    def test_resend_requires_post_and_sends(self):
+        self._register()
+        mail.outbox.clear()
+        response = self.client.get(reverse("resend_verification"))
+        self.assertEqual(response.status_code, 405)
+        response = self.client.post(reverse("resend_verification"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(mail.outbox), 1)
+
+
+class PasswordResetTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+
+    def test_reset_email_sent_for_known_address(self):
+        response = self.client.post(reverse("password_reset"),
+                                    {"email": "alice@example.com"})
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("/accounts/reset/", mail.outbox[0].body)
+
+    def test_no_account_enumeration_for_unknown_address(self):
+        response = self.client.post(reverse("password_reset"),
+                                    {"email": "ghost@example.com"})
+        self.assertEqual(response.status_code, 302)  # same outcome either way
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_reset_form_is_rate_limited(self):
+        for _ in range(5):
+            self.client.post(reverse("password_reset"), {"email": "alice@example.com"})
+        response = self.client.post(reverse("password_reset"),
+                                    {"email": "alice@example.com"})
         self.assertEqual(response.status_code, 429)
 
 

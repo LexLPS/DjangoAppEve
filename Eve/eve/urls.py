@@ -17,6 +17,7 @@ Including another URLconf
 from django.conf import settings
 from django.contrib import admin
 from django.urls import path, include
+from django_otp.admin import OTPAdminSite
 from rest_framework.routers import DefaultRouter
 from accounts.api_views import ProfileViewSet
 from core.throttling import rate_limit
@@ -24,7 +25,11 @@ from core.throttling import rate_limit
 router = DefaultRouter()
 router.register(r"profile", ProfileViewSet, basename="profile")
 
-# Brute-force protection on the admin login form
+# MFA for administrators: swap in the OTP-enforcing admin site first, then
+# wrap its login with brute-force protection (order matters — wrapping first
+# would pin the non-OTP login form)
+if settings.ADMIN_REQUIRE_MFA:
+    admin.site.__class__ = OTPAdminSite
 admin.site.login = rate_limit("admin-login", limit=5, window_seconds=300)(admin.site.login)
 
 urlpatterns = [

@@ -1,3 +1,28 @@
+from django.conf import settings
+from django.http import Http404
+
+
+class AdminIPAllowlistMiddleware:
+    """Optional IP allowlist for the admin interface.
+
+    Active only when ADMIN_ALLOWED_IPS is non-empty; otherwise the admin is
+    expected to sit behind VPN/SSO at the reverse proxy (see
+    docs/SECURITY_OPERATIONS.md). Responds 404, not 403, so the admin path
+    is not confirmed to unauthorized clients.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        allowed = settings.ADMIN_ALLOWED_IPS
+        if allowed and request.path.startswith(f"/{settings.ADMIN_URL}"):
+            client_ip = request.META.get("REMOTE_ADDR", "")
+            if client_ip not in allowed:
+                raise Http404
+        return self.get_response(request)
+
+
 class SecurityHeadersMiddleware:
     """Adds security headers Django doesn't set itself.
 

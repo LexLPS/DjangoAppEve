@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.http import HttpResponse
-from django.test import Client, RequestFactory, TestCase
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from .models import ContactMessage
@@ -76,6 +76,27 @@ class RateLimitUnitTests(TestCase):
         self.assertEqual(dummy(self.factory.post("/")).status_code, 200)
         self.assertEqual(dummy(self.factory.post("/")).status_code, 429)
         self.assertEqual(dummy(self.factory.get("/")).status_code, 200)
+
+
+class AdminIPAllowlistTests(TestCase):
+    @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
+    def test_admin_hidden_from_unlisted_ips(self):
+        response = self.client.get("/admin/", REMOTE_ADDR="198.51.100.7")
+        self.assertEqual(response.status_code, 404)
+
+    @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
+    def test_admin_reachable_from_allowed_ip(self):
+        response = self.client.get("/admin/", REMOTE_ADDR="203.0.113.10")
+        self.assertEqual(response.status_code, 302)  # redirect to admin login
+
+    @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
+    def test_non_admin_paths_unaffected(self):
+        response = self.client.get(reverse("landing"), REMOTE_ADDR="198.51.100.7")
+        self.assertEqual(response.status_code, 200)
+
+    def test_allowlist_disabled_when_empty(self):
+        response = self.client.get("/admin/", REMOTE_ADDR="198.51.100.7")
+        self.assertEqual(response.status_code, 302)
 
 
 class HealthCheckTests(TestCase):

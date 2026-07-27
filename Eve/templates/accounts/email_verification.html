@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Eve – Email Verification{% endblock %}
+
+{% block content %}
+    {% if success %}
+        <h1>Email verified</h1>
+        <p>Thank you — your email address is now confirmed.</p>
+    {% else %}
+        <h1>Verification failed</h1>
+        <p>This verification link is invalid or has expired. You can request a
+           new one from your profile page.</p>
+    {% endif %}
+    <p><a href="{% url 'landing' %}">Back to home</a></p>
+{% endblock %}

@@ -1,34 +1,46 @@
+import logging
 import time
 from functools import wraps
 
 from django.core.cache import cache
 from django.http import HttpResponse
 
+logger = logging.getLogger(__name__)
+
+
+def _current_count(key_prefix: str, ident: str, limit: int, window_seconds: int):
+    """Increment and return the fixed-window counter, or None if the cache
+    backend is unreachable (fail open: availability over throttling, loudly
+    logged so monitoring catches a dead Redis)."""
+    window = int(time.time() // window_seconds)
+    key = f"ratelimit:{key_prefix}:{ident}:{window}"
+    try:
+        if cache.add(key, 1, timeout=window_seconds):
+            return 1
+        try:
+            return cache.incr(key)
+        except ValueError:  # key expired between add and incr
+            cache.add(key, 1, timeout=window_seconds)
+            return 1
+    except Exception:
+        logger.exception("Rate-limit cache unavailable; failing open")
+        return None
+
 
 def rate_limit(key_prefix: str, limit: int, window_seconds: int):
     """Fixed-window per-IP rate limit for POST requests.
 
     Keyed on REMOTE_ADDR, not X-Forwarded-For, which clients can spoof.
-    Backed by Django's cache: with the default LocMemCache the window is
-    per-process, so configure a shared cache (Redis/Memcached) in production
-    to make the limit global across workers.
+    Backed by Django's cache — Redis in production (see REDIS_URL), so the
+    window is shared across all workers.
     """
     def decorator(view_func):
         @wraps(view_func)
         def wrapper(request, *args, **kwargs):
             if request.method == "POST":
                 ident = request.META.get("REMOTE_ADDR", "unknown")
-                window = int(time.time() // window_seconds)
-                key = f"ratelimit:{key_prefix}:{ident}:{window}"
-                if cache.add(key, 1, timeout=window_seconds):
-                    count = 1
-                else:
-                    try:
-                        count = cache.incr(key)
-                    except ValueError:  # key expired between add and incr
-                        cache.add(key, 1, timeout=window_seconds)
-                        count = 1
-                if count > limit:
+                count = _current_count(key_prefix, ident, limit, window_seconds)
+                if count is not None and count > limit:
                     return HttpResponse(
                         "Too many attempts. Please try again later.",
                         status=429,

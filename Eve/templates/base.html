@@ -1,37 +1,10 @@
 <!DOCTYPE html>
+{% load static %}
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <title>{% block title %}Eve{% endblock %}</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            background: #f5f5f5;
-        }
-
-        nav {
-            background: #20232a;
-            padding: 15px;
-        }
-
-        nav a {
-            color: white;
-            text-decoration: none;
-            margin-right: 20px;
-            font-weight: bold;
-        }
-
-        nav a:hover {
-            text-decoration: underline;
-        }
-
-        .container {
-            width: 85%;
-            margin: auto;
-            padding: 30px 0;
-        }
-    </style>
+    <link rel="stylesheet" href="{% static 'css/eve.css' %}">
 </head>
 
 <body>
@@ -47,7 +20,10 @@
             <a href="{% url 'cart' %}">Cart</a>
             <a href="{% url 'checkout' %}">Checkout</a>
             <a href="{% url 'payment_history' %}">Payment History</a>
-            <a href="{% url 'logout' %}">Logout</a>
+            <form method="post" action="{% url 'logout' %}">
+                {% csrf_token %}
+                <button type="submit">Logout</button>
+            </form>
         {% else %}
             <a href="{% url 'login' %}">Login</a>
             <a href="{% url 'register' %}">Register</a>
@@ -55,6 +31,14 @@
     </nav>
 
     <div class="container">
+        {% if messages %}
+            <div class="messages">
+                {% for message in messages %}
+                    <p>{{ message }}</p>
+                {% endfor %}
+            </div>
+        {% endif %}
+
         {% block content %}
         {% endblock %}
     </div>

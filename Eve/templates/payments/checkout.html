@@ -4,5 +4,25 @@
 
 {% block content %}
     <h1>Checkout</h1>
-    <p>Online checkout is not available yet. Please check back soon.</p>
+
+    {% if checkout_enabled %}
+        {% if items %}
+            <ul>
+                {% for item in items %}
+                    <li>{{ item.name }} × {{ item.quantity }}</li>
+                {% endfor %}
+            </ul>
+            <p>The final total is calculated at order time.</p>
+            <form method="post">
+                {% csrf_token %}
+                <button type="submit" class="btn">
+                    Place order
+                </button>
+            </form>
+        {% else %}
+            <p>Your cart is empty.</p>
+        {% endif %}
+    {% else %}
+        <p>Online checkout is not available yet. Please check back soon.</p>
+    {% endif %}
 {% endblock %}

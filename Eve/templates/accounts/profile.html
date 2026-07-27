@@ -8,8 +8,21 @@
     <h2>Account info</h2>
     <ul>
         <li>Username: {{ request.user.username }}</li>
-        <li>Email: {{ request.user.email }}</li>
+        <li>Email: {{ request.user.email }}
+            {% if profile.email_verified %}
+                (verified)
+            {% else %}
+                (not verified)
+            {% endif %}
+        </li>
     </ul>
+
+    {% if not profile.email_verified %}
+        <form method="post" action="{% url 'resend_verification' %}">
+            {% csrf_token %}
+            <button type="submit">Resend verification email</button>
+        </form>
+    {% endif %}
 
     <h2>Patient / VR details</h2>
     <ul>

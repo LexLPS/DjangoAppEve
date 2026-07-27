@@ -1,0 +1,11 @@
+# Gitleaks configuration (secret scanning in CI).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-burned historical secrets and non-secrets"
+paths = [
+    # Deleted in cf64f3e; its hardcoded SECRET_KEY is documented as burned
+    # and must never be reused (docs/SECURITY_OPERATIONS.md)
+    '''Eve/eve/settings\.py''',
+]

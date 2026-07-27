@@ -1,12 +1,18 @@
 import logging
+from urllib.parse import urlparse
 
-from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
-from django.views.decorators.http import require_POST
 from django.http import Http404, HttpResponseBadRequest
-from .services.mongo_client import cache_product, get_cached_products, get_cached_product
-from .services.saleor_client import fetch_products_from_saleor, fetch_product_by_slug, SaleorAPIError
-from .services.cart_service import get_cart, add_to_cart, remove_from_cart
+from django.shortcuts import redirect, render
+from django.views.decorators.http import require_POST
+
+from .services.cart_service import add_to_cart, get_cart, remove_from_cart
+from .services.mongo_client import cache_product, get_cached_product, get_cached_products
+from .services.saleor_client import (
+    SaleorAPIError,
+    fetch_product_by_slug,
+    fetch_products_from_saleor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +26,35 @@ def _is_valid_product(product) -> bool:
         isinstance(product.get(key), str) and product[key]
         for key in ("id", "name", "slug")
     )
+
+
+def _safe_url(url):
+    """Only plain http(s) URLs may be stored or rendered — anything else
+    (javascript:, data:, malformed) is dropped."""
+    if not isinstance(url, str):
+        return None
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return url
+    return None
+
+
+def _sanitize_product(product: dict) -> dict:
+    thumbnail = product.get("thumbnail")
+    safe_thumb = _safe_url(thumbnail.get("url")) if isinstance(thumbnail, dict) else None
+    product["thumbnail"] = {"url": safe_thumb} if safe_thumb else None
+
+    media = product.get("media")
+    if isinstance(media, list):
+        product["media"] = [
+            {"url": _safe_url(m.get("url"))}
+            for m in media
+            if isinstance(m, dict) and _safe_url(m.get("url"))
+        ]
+    return product
 
 
 def _parse_quantity(raw):
@@ -39,13 +74,13 @@ def product_catalogue_view(request):
     #  Try Mongo cache first (only entries still within the TTL)
     cached_products = get_cached_products(limit=50)
     if cached_products:
-        products = cached_products
+        products = [_sanitize_product(p) for p in cached_products if _is_valid_product(p)]
 
     #  If no fresh cache, try Saleor
     if not products:
         try:
             fetched = fetch_products_from_saleor(first=20)
-            products = [p for p in fetched if _is_valid_product(p)]
+            products = [_sanitize_product(p) for p in fetched if _is_valid_product(p)]
             logger.info("Saleor returned %d products (%d valid)", len(fetched), len(products))
 
             for product in products:
@@ -96,17 +131,18 @@ def _get_product_or_404(slug: str) -> dict:
     """Fresh cache first, then Saleor; validates before caching/returning."""
     cached = get_cached_product(slug)
     if cached and _is_valid_product(cached):
-        return cached
+        return _sanitize_product(cached)
 
     try:
         product = fetch_product_by_slug(slug)
     except SaleorAPIError:
         logger.exception("Saleor product fetch failed (slug=%s)", slug)
-        raise Http404("Product not available at the moment")
+        raise Http404("Product not available at the moment") from None
 
     if not _is_valid_product(product):
         raise Http404("Product not found")
 
+    product = _sanitize_product(product)
     cache_product(product)
     return product
 

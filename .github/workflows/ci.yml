@@ -1,0 +1,90 @@
+# Required checks. Make every job below a required status check in GitHub
+# branch protection (Settings -> Branches -> main) so merging/deploying is
+# blocked when any of them fails.
+name: CI
+
+on:
+  push:
+    branches: [main, security-hardening]
+  pull_request:
+
+jobs:
+  tests:
+    name: Test suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Eve
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: Eve/requirements.lock
+      - run: pip install -r requirements.lock
+      - run: python manage.py test --settings=eve.settings.test --verbosity=2
+
+  deploy-check:
+    name: Django deploy checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Eve
+    env:
+      DJANGO_ENV: prod
+      DJANGO_SECRET_KEY: ci-dummy-9f3k2m8x7q1w5e4r6t0y3u9i2o5p8a1s4d7f0g3h6j9k2l5z8x1
+      DJANGO_ALLOWED_HOSTS: ci.example.com
+      DB_NAME: ci
+      DB_USER: ci
+      DB_PASSWORD: ci-dummy-password
+      DB_HOST: localhost
+      MONGODB_URI: mongodb://u:p@db.example.net:27017/?tls=true
+      MONGODB_DB_NAME: ci
+      SALEOR_GRAPHQL_URL: https://saleor.example.com/graphql/
+      REDIS_URL: rediss://redis.example.net:6380
+      EMAIL_HOST: smtp.example.net
+      DEFAULT_FROM_EMAIL: noreply@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: Eve/requirements.lock
+      - run: pip install -r requirements.lock
+      - run: python manage.py check --deploy --fail-level WARNING
+
+  dependency-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install pip-audit
+      - run: pip-audit -r Eve/requirements.lock
+
+  static-analysis:
+    name: Static analysis (ruff + bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install ruff bandit
+      - run: ruff check Eve
+      - run: bandit -r Eve -c Eve/bandit.yaml -ll
+
+  secret-scan:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

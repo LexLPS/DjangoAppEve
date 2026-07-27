@@ -1,133 +1,242 @@
+"""Saleor GraphQL client.
+
+Resilience properties:
+- One pooled requests.Session per process (connection reuse, capped pool)
+- Bounded retries with exponential backoff and jitter — read queries only;
+  mutations are never auto-retried because they are not idempotent
+- Cache-backed circuit breaker shared across workers: after consecutive
+  failures the circuit opens and calls fail fast for a cooldown period
+- Error messages carry status codes and metadata only. Response bodies,
+  tokens, and personal data must never appear in exceptions or logs.
+"""
+import logging
+import random
+import time
+
 import requests
 from django.conf import settings
+from django.core.cache import cache
+
+logger = logging.getLogger(__name__)
 
 SALEOR_GRAPHQL_URL = settings.SALEOR_GRAPHQL_URL
 SALEOR_CHANNEL = settings.SALEOR_CHANNEL
+
+CONNECT_TIMEOUT = 3.05
+READ_TIMEOUT = 10
+MAX_ATTEMPTS = 3          # 1 initial + 2 retries, reads only
+BACKOFF_BASE_SECONDS = 0.5
+RETRYABLE_STATUS = {429, 502, 503, 504}
+
+CIRCUIT_FAILURE_THRESHOLD = 5
+CIRCUIT_COOLDOWN_SECONDS = 60
+_CB_FAILURES_KEY = "saleor:circuit:failures"
+_CB_OPEN_KEY = "saleor:circuit:open"
+
+_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=2, pool_maxsize=10)
+_session.mount("https://", _adapter)
+_session.mount("http://", _adapter)
+
 
 class SaleorAPIError(RuntimeError):
     pass
 
 
-def fetch_products_from_saleor(first=20):
-    if not SALEOR_GRAPHQL_URL:
-        raise SaleorAPIError("SALEOR_GRAPHQL_URL is not configured in settings.")
+class SaleorCircuitOpen(SaleorAPIError):
+    """Failing fast: Saleor has been failing repeatedly and is in cooldown."""
 
-    query = """
-    query ($first: Int!, $channel: String!) {
-      products(first: $first, channel: $channel) {
-        edges {
-          node {
-            id
-            name
-            slug
-            description
-            thumbnail {
-              url
-            }
-            pricing {
-              priceRange {
-                start { gross { amount currency } }
-                stop  { gross { amount currency } }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
 
-    variables = {
-        "first": first,
-        "channel": SALEOR_CHANNEL,
-    }
+# --- Circuit breaker (shared via Django cache / Redis). Cache failures are
+# swallowed: an unreachable cache must not take the client down with it.
 
-    response = requests.post(
-        SALEOR_GRAPHQL_URL,
-        json={"query": query, "variables": variables},
-        timeout=10,
-    )
-
-    content_type = response.headers.get("content-type", "")
-
-    if "application/json" not in content_type:
-        body_preview = response.text[:200]
-        raise SaleorAPIError(
-            f"Saleor endpoint did not return JSON (content-type={content_type}). "
-            f"Body starts with: {body_preview!r}"
-        )
-
+def _circuit_is_open() -> bool:
     try:
-        data = response.json()
-    except ValueError:
-        raise SaleorAPIError(
-            "Saleor GraphQL did not return valid JSON. "
-            f"Body starts with: {response.text[:200]!r}"
-        )
+        return cache.get(_CB_OPEN_KEY) is not None
+    except Exception:
+        return False
 
-    if "errors" in data:
-        raise SaleorAPIError(f"Saleor GraphQL errors: {data['errors']}")
 
-    edges = data["data"]["products"]["edges"]
-    return [edge["node"] for edge in edges]
+def _circuit_record_failure():
+    try:
+        if cache.add(_CB_FAILURES_KEY, 1, timeout=CIRCUIT_COOLDOWN_SECONDS * 2):
+            failures = 1
+        else:
+            failures = cache.incr(_CB_FAILURES_KEY)
+        if failures >= CIRCUIT_FAILURE_THRESHOLD:
+            cache.set(_CB_OPEN_KEY, True, timeout=CIRCUIT_COOLDOWN_SECONDS)
+            cache.delete(_CB_FAILURES_KEY)
+            logger.error(
+                "Saleor circuit opened after %d consecutive failures; "
+                "failing fast for %ds", failures, CIRCUIT_COOLDOWN_SECONDS,
+            )
+    except Exception:
+        logger.exception("Circuit-breaker cache unavailable")
 
-def fetch_product_by_slug(slug: str):
-    if not SALEOR_GRAPHQL_URL:
-        raise SaleorAPIError("SALEOR_GRAPHQL_URL is not configured in settings.")
 
-    query = """
-    query ($slug: String!, $channel: String!) {
-      product(slug: $slug, channel: $channel) {
-        id
-        name
-        slug
-        description
-        thumbnail {
-          url
-        }
-        media {
-          url
-        }
-        pricing {
-          priceRange {
-            start { gross { amount currency } }
-            stop  { gross { amount currency } }
-          }
-        }
-      }
-    }
-    """
+def _circuit_record_success():
+    try:
+        cache.delete(_CB_FAILURES_KEY)
+    except Exception:
+        pass
 
-    variables = {
-        "slug": slug,
-        "channel": SALEOR_CHANNEL,
-    }
 
+def _backoff_sleep(attempt: int):
+    delay = BACKOFF_BASE_SECONDS * (2 ** attempt) + random.uniform(0, 0.5)
+    time.sleep(delay)
+
+
+def _do_request(query: str, variables: dict) -> requests.Response:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-
-    if getattr(settings, "SALEOR_API_TOKEN", None):
+    if getattr(settings, "SALEOR_API_TOKEN", ""):
         headers["Authorization"] = f"Bearer {settings.SALEOR_API_TOKEN}"
-
-    response = requests.post(
+    return _session.post(
         SALEOR_GRAPHQL_URL,
         json={"query": query, "variables": variables},
         headers=headers,
-        timeout=10,
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
     )
+
+
+def _parse_response(response: requests.Response) -> dict:
+    """Validate and decode; error messages carry metadata only, never bodies."""
+    if response.status_code >= 400:
+        raise SaleorAPIError(f"Saleor returned HTTP {response.status_code}")
 
     content_type = response.headers.get("content-type", "")
     if "application/json" not in content_type:
-        body_preview = response.text[:200]
         raise SaleorAPIError(
-            f"Saleor endpoint did not return JSON (content-type={content_type}). "
-            f"Body starts with: {body_preview!r}"
+            f"Saleor returned non-JSON content-type {content_type!r} "
+            f"({len(response.content)} bytes)"
         )
 
-    data = response.json()
-    if "errors" in data:
-        raise SaleorAPIError(f"Saleor GraphQL errors: {data['errors']}")
+    try:
+        payload = response.json()
+    except ValueError:
+        raise SaleorAPIError("Saleor response was not valid JSON") from None
 
-    product = data["data"]["product"]
-    return product  # can be None if slug not found
+    if not isinstance(payload, dict):
+        raise SaleorAPIError("Saleor response had unexpected shape")
+
+    if payload.get("errors"):
+        codes = [
+            (e.get("extensions") or {}).get("code", "unknown")
+            for e in payload["errors"]
+            if isinstance(e, dict)
+        ]
+        raise SaleorAPIError(f"Saleor GraphQL errors: codes={codes}")
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise SaleorAPIError("Saleor response missing data")
+    return data
+
+
+def saleor_graphql(query: str, variables: dict, retry: bool = True) -> dict:
+    """Execute a GraphQL request and return the `data` payload.
+
+    retry=True is only safe for read queries. Mutations must pass
+    retry=False — a timed-out mutation may have been applied.
+    """
+    if not SALEOR_GRAPHQL_URL:
+        raise SaleorAPIError("SALEOR_GRAPHQL_URL is not configured in settings.")
+
+    if _circuit_is_open():
+        raise SaleorCircuitOpen("Saleor circuit is open; skipping call")
+
+    attempts = MAX_ATTEMPTS if retry else 1
+    last_error = None
+
+    for attempt in range(attempts):
+        try:
+            response = _do_request(query, variables)
+            if retry and response.status_code in RETRYABLE_STATUS and attempt < attempts - 1:
+                logger.warning(
+                    "Saleor HTTP %d, retrying (attempt %d/%d)",
+                    response.status_code, attempt + 1, attempts,
+                )
+                _backoff_sleep(attempt)
+                continue
+            data = _parse_response(response)
+        except requests.Timeout:
+            last_error = SaleorAPIError("Saleor request timed out")
+            logger.warning("Saleor timeout (attempt %d/%d)", attempt + 1, attempts)
+        except requests.RequestException as exc:
+            last_error = SaleorAPIError(
+                f"Saleor connection error: {type(exc).__name__}"
+            )
+            logger.warning(
+                "Saleor connection error %s (attempt %d/%d)",
+                type(exc).__name__, attempt + 1, attempts,
+            )
+        except SaleorAPIError:
+            _circuit_record_failure()
+            raise
+        else:
+            _circuit_record_success()
+            return data
+
+        if attempt < attempts - 1:
+            _backoff_sleep(attempt)
+
+    _circuit_record_failure()
+    raise last_error
+
+
+PRODUCT_FIELDS = """
+    id
+    name
+    slug
+    description
+    thumbnail {
+      url
+    }
+    defaultVariant {
+      id
+    }
+    pricing {
+      priceRange {
+        start { gross { amount currency } }
+        stop  { gross { amount currency } }
+      }
+    }
+"""
+
+
+def fetch_products_from_saleor(first=20):
+    query = f"""
+    query ($first: Int!, $channel: String!) {{
+      products(first: $first, channel: $channel) {{
+        edges {{
+          node {{
+            {PRODUCT_FIELDS}
+          }}
+        }}
+      }}
+    }}
+    """
+    data = saleor_graphql(query, {"first": first, "channel": SALEOR_CHANNEL})
+    try:
+        return [edge["node"] for edge in data["products"]["edges"]]
+    except (KeyError, TypeError):
+        raise SaleorAPIError("Saleor products response was incomplete") from None
+
+
+def fetch_product_by_slug(slug: str):
+    query = f"""
+    query ($slug: String!, $channel: String!) {{
+      product(slug: $slug, channel: $channel) {{
+        {PRODUCT_FIELDS}
+        media {{
+          url
+        }}
+      }}
+    }}
+    """
+    data = saleor_graphql(query, {"slug": slug, "channel": SALEOR_CHANNEL})
+    if "product" not in data:
+        raise SaleorAPIError("Saleor product response was incomplete")
+    return data["product"]  # can be None if slug not found

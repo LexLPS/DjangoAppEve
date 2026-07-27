@@ -2,8 +2,11 @@
 # install with: pip install -r requirements.lock
 Django==5.2.16
 djangorestframework==3.16.1
+django-otp==1.7.0
 psycopg2-binary==2.9.11
 pymongo==4.15.4
+qrcode==8.2
+redis==8.0.1
 requests==2.33.0
 python-decouple==3.8
 gunicorn==26.0.0

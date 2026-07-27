@@ -1,10 +1,12 @@
+import time
 from unittest.mock import patch
 
 from django.core.cache import cache
 from django.http import HttpResponse
-from django.test import Client, RequestFactory, TestCase
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
+from .middleware import TrustedProxyMiddleware
 from .models import ContactMessage
 from .throttling import rate_limit
 
@@ -76,6 +78,78 @@ class RateLimitUnitTests(TestCase):
         self.assertEqual(dummy(self.factory.post("/")).status_code, 200)
         self.assertEqual(dummy(self.factory.post("/")).status_code, 429)
         self.assertEqual(dummy(self.factory.get("/")).status_code, 200)
+
+
+class TrustedProxyMiddlewareTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.middleware = TrustedProxyMiddleware(
+            lambda request: HttpResponse(request.META["REMOTE_ADDR"])
+        )
+
+    @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
+    def test_client_ip_taken_from_forwarded_header_behind_trusted_proxy(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="6.6.6.6, 203.0.113.5",
+        )
+        # The spoofable client-supplied prefix (6.6.6.6) is ignored; only the
+        # rightmost untrusted hop — appended by our own proxy — counts
+        self.assertEqual(self.middleware(request).content, b"203.0.113.5")
+
+    @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
+    def test_forwarded_header_ignored_from_untrusted_peer(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="198.51.100.9",
+            HTTP_X_FORWARDED_FOR="203.0.113.5",
+        )
+        self.assertEqual(self.middleware(request).content, b"198.51.100.9")
+
+    def test_noop_when_no_trusted_proxies_configured(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="198.51.100.9",
+            HTTP_X_FORWARDED_FOR="203.0.113.5",
+        )
+        self.assertEqual(self.middleware(request).content, b"198.51.100.9")
+
+
+class SharedCacheRateLimitTests(TestCase):
+    """Rate-limit counters live in the shared Django cache (Redis in
+    production), so attempts made through OTHER workers count here too —
+    simulated by writing the counter directly."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_counts_from_other_workers_are_honored(self):
+        # login limit is 5/300s; pretend other workers already saw 5 POSTs
+        for window in (int(time.time() // 300), int(time.time() // 300) + 1):
+            cache.set(f"ratelimit:login:127.0.0.1:{window}", 5, timeout=300)
+        response = self.client.post(
+            reverse("login"), {"username": "x", "password": "y"}
+        )
+        self.assertEqual(response.status_code, 429)
+
+
+class AdminIPAllowlistTests(TestCase):
+    @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
+    def test_admin_hidden_from_unlisted_ips(self):
+        response = self.client.get("/admin/", REMOTE_ADDR="198.51.100.7")
+        self.assertEqual(response.status_code, 404)
+
+    @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
+    def test_admin_reachable_from_allowed_ip(self):
+        response = self.client.get("/admin/", REMOTE_ADDR="203.0.113.10")
+        self.assertEqual(response.status_code, 302)  # redirect to admin login
+
+    @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
+    def test_non_admin_paths_unaffected(self):
+        response = self.client.get(reverse("landing"), REMOTE_ADDR="198.51.100.7")
+        self.assertEqual(response.status_code, 200)
+
+    def test_allowlist_disabled_when_empty(self):
+        response = self.client.get("/admin/", REMOTE_ADDR="198.51.100.7")
+        self.assertEqual(response.status_code, 302)
 
 
 class HealthCheckTests(TestCase):

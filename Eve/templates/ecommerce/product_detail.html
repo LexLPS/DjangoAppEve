@@ -5,43 +5,41 @@
 {% block content %}
     <h1>{{ product.name }}</h1>
 
-    <div style="display:flex; gap:30px; margin-top:20px; align-items:flex-start;">
-        <div style="flex:0 0 320px;">
+    <div class="product-detail">
+        <div class="media">
             {% if product.media %}
-                <img src="{{ product.media.0.url }}" alt="{{ product.name }}" style="max-width:100%; border-radius:8px;">
+                <img src="{{ product.media.0.url }}" alt="{{ product.name }}">
             {% elif product.thumbnail and product.thumbnail.url %}
-                <img src="{{ product.thumbnail.url }}" alt="{{ product.name }}" style="max-width:100%; border-radius:8px;">
+                <img src="{{ product.thumbnail.url }}" alt="{{ product.name }}">
             {% endif %}
         </div>
 
-        <div style="flex:1;">
+        <div class="info">
             {% if product.pricing and product.pricing.priceRange and product.pricing.priceRange.start %}
                 {% with price=product.pricing.priceRange.start.gross %}
-                    <p style="font-size:1.4em; font-weight:bold; margin-top:0;">
+                    <p class="price">
                         {{ price.amount }} {{ price.currency }}
                     </p>
                 {% endwith %}
             {% endif %}
 
             {% if product.description %}
-                <div style="margin-top:15px;">
+                <div class="description">
                     {{ product.description|striptags|linebreaks }}
                 </div>
             {% endif %}
-                <form method="post" action="{% url 'add_to_cart' product.slug %}">
-                    {% csrf_token %}
-                    <label>
-                        Quantity:
-                        <input type="number" name="quantity" value="1" min="1" style="width:60px;">
-                    </label>
-                    <button type="submit"
-                            style="margin-top:10px; padding:10px 16px; border:none; border-radius:4px;
-                                background:#20232a; color:white; cursor:pointer;">
-                        Add to cart
-                    </button>
-                </form>
+            <form method="post" action="{% url 'add_to_cart' product.slug %}">
+                {% csrf_token %}
+                <label>
+                    Quantity:
+                    <input type="number" name="quantity" value="1" min="1" max="20" class="quantity-input">
+                </label>
+                <button type="submit" class="btn add-to-cart-btn">
+                    Add to cart
+                </button>
+            </form>
 
-            <p style="margin-top:15px;">
+            <p class="back-link">
                 <a href="{% url 'product_catalogue' %}">← Back to catalogue</a>
             </p>
         </div>

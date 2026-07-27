@@ -1,42 +1,61 @@
-from django.shortcuts import render, get_object_or_404, redirect
+import logging
+
+from django.shortcuts import render, redirect
 from django.contrib.auth.decorators import login_required
 from django.views.decorators.http import require_POST
-from django.http import Http404
-from .services.mongo_client import products_collection
+from django.http import Http404, HttpResponseBadRequest
+from .services.mongo_client import cache_product, get_cached_products, get_cached_product
 from .services.saleor_client import fetch_products_from_saleor, fetch_product_by_slug, SaleorAPIError
 from .services.cart_service import get_cart, add_to_cart, remove_from_cart
-import sys
+
+logger = logging.getLogger(__name__)
+
+MAX_CART_QUANTITY = 20
+
+
+def _is_valid_product(product) -> bool:
+    """External data (Saleor / Mongo) is untrusted: require the fields the
+    templates and cart depend on before rendering or caching anything."""
+    return isinstance(product, dict) and all(
+        isinstance(product.get(key), str) and product[key]
+        for key in ("id", "name", "slug")
+    )
+
+
+def _parse_quantity(raw):
+    try:
+        quantity = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if not 1 <= quantity <= MAX_CART_QUANTITY:
+        return None
+    return quantity
 
 
 def product_catalogue_view(request):
     products = []
-    saleor_error = None
+    catalogue_unavailable = False
 
-    #  Try Mongo cache first
-    cached_products = list(products_collection.find().limit(50))
+    #  Try Mongo cache first (only entries still within the TTL)
+    cached_products = get_cached_products(limit=50)
     if cached_products:
         products = cached_products
 
-    #  If no cache, try Saleor
+    #  If no fresh cache, try Saleor
     if not products:
         try:
-            products = fetch_products_from_saleor(first=20)
-            print("SALEOR: got", len(products), "products", file=sys.stderr)
+            fetched = fetch_products_from_saleor(first=20)
+            products = [p for p in fetched if _is_valid_product(p)]
+            logger.info("Saleor returned %d products (%d valid)", len(fetched), len(products))
 
-            # Save to Mongo only if we actually got something
-            if products:
-                for product in products:
-                    products_collection.update_one(
-                        {"id": product["id"]},
-                        {"$set": product},
-                        upsert=True,
-                    )
-        except SaleorAPIError as e:
-            saleor_error = str(e)
-            print("SALEOR ERROR:", e, file=sys.stderr)
+            for product in products:
+                cache_product(product)
+        except SaleorAPIError:
+            catalogue_unavailable = True
+            logger.exception("Saleor catalogue fetch failed")
 
     #  If still nothing AND there was an error, use fallback mock data
-    if not products and saleor_error is not None:
+    if not products and catalogue_unavailable:
         products = [
             {
                 "id": "1",
@@ -68,45 +87,51 @@ def product_catalogue_view(request):
 
     context = {
         "products": products,
-        "saleor_error": saleor_error,
+        "catalogue_unavailable": catalogue_unavailable,
     }
     return render(request, "ecommerce/product_catalogue.html", context)
 
-def product_detail_view(request, slug):
+
+def _get_product_or_404(slug: str) -> dict:
+    """Fresh cache first, then Saleor; validates before caching/returning."""
+    cached = get_cached_product(slug)
+    if cached and _is_valid_product(cached):
+        return cached
+
     try:
-        #  Try Mongo cache first
-        cached = products_collection.find_one({"slug": slug})
-        if cached:
-            product = cached
-        else:
-            #  Fetch from Saleor
-            product = fetch_product_by_slug(slug)
-            if product is None:
-                raise Http404("Product not found")
-
-            #  Cache in Mongo
-            products_collection.update_one(
-                {"id": product["id"]},
-                {"$set": product},
-                upsert=True,
-            )
-
-    except SaleorAPIError as e:
-        print("SALEOR ERROR (detail):", e, file=sys.stderr)
+        product = fetch_product_by_slug(slug)
+    except SaleorAPIError:
+        logger.exception("Saleor product fetch failed (slug=%s)", slug)
         raise Http404("Product not available at the moment")
 
+    if not _is_valid_product(product):
+        raise Http404("Product not found")
+
+    cache_product(product)
+    return product
+
+
+def product_detail_view(request, slug):
+    product = _get_product_or_404(slug)
     return render(request, "ecommerce/product_detail.html", {"product": product})
+
 
 @login_required
 def cart_view(request):
     cart = get_cart(request.user.id)
     items = cart["items"]
 
+    # Cart docs come from Mongo: tolerate missing/odd fields instead of 500ing
     total_amount = 0
     currency = None
     for item in items:
-        total_amount += item["price_amount"] * item["quantity"]
-        currency = item["price_currency"]  # last one wins; assume same currency
+        try:
+            amount = float(item.get("price_amount") or 0)
+            quantity = int(item.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+        total_amount += amount * quantity
+        currency = item.get("price_currency") or currency
 
     context = {
         "cart": cart,
@@ -120,27 +145,12 @@ def cart_view(request):
 @login_required
 @require_POST
 def add_to_cart_view(request, slug):
-    quantity = int(request.POST.get("quantity", 1))
+    quantity = _parse_quantity(request.POST.get("quantity", 1))
+    if quantity is None:
+        return HttpResponseBadRequest("Invalid quantity.")
 
-    try:
-        # try cache
-        product = products_collection.find_one({"slug": slug})
-        if not product:
-            product = fetch_product_by_slug(slug)
-            if not product:
-                raise Http404("Product not found")
-
-            products_collection.update_one(
-                {"id": product["id"]},
-                {"$set": product},
-                upsert=True,
-            )
-
-        add_to_cart(request.user.id, product, quantity)
-
-    except SaleorAPIError as e:
-        print("SALEOR ERROR (add_to_cart):", e, file=sys.stderr)
-        # silently ignore for now or show message later
+    product = _get_product_or_404(slug)
+    add_to_cart(request.user.id, product, quantity)
 
     return redirect("cart")
 

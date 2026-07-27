@@ -1,0 +1,7 @@
+Django==5.2.8
+djangorestframework
+psycopg2-binary
+pymongo
+requests
+python-decouple
+gunicorn

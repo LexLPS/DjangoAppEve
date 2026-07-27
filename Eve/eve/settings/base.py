@@ -12,16 +12,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 from decouple import config
-import environ
-import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-
-env = environ.Env(
-    DEBUG=(bool, False)
-)
-environ.Env.read_env(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
@@ -30,8 +23,8 @@ environ.Env.read_env(BASE_DIR / ".env")
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config("DJANGO_SECRET_KEY", default="dev-unsafe-secret")
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Safe default; overridden by dev.py / prod.py
+DEBUG = False
 
 ALLOWED_HOSTS = []
 
@@ -90,6 +83,10 @@ WSGI_APPLICATION = 'eve.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 SALEOR_GRAPHQL_URL = config("SALEOR_GRAPHQL_URL", default="")
 SALEOR_CHANNEL = config("SALEOR_CHANNEL", default="default-channel")
+SALEOR_API_TOKEN = config("SALEOR_API_TOKEN", default="")
+
+# How long Mongo-cached Saleor products stay fresh before re-fetching
+PRODUCT_CACHE_TTL_SECONDS = config("PRODUCT_CACHE_TTL_SECONDS", default=3600, cast=int)
 
 DATABASES = {
     "default": {
@@ -104,6 +101,24 @@ DATABASES = {
 MONGODB = {
     "HOST": config("MONGODB_URI", default="mongodb://localhost:27017"),
     "DB_NAME": config("MONGODB_DB_NAME", default="EVEDB")
+}
+
+REST_FRAMEWORK = {
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "30/min",
+        "user": "120/min",
+    },
+}
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "root": {"handlers": ["console"], "level": "INFO"},
 }
 
 # Password validation
@@ -142,7 +157,6 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_DIRS = [BASE_DIR / "static"]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

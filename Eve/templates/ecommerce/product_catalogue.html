@@ -6,9 +6,9 @@
     <h1>VR Experiences Catalogue</h1>
     <p>Explore Eve’s line of experiences designed for long-term patients.</p>
 
-    {% if saleor_error %}
+    {% if catalogue_unavailable %}
         <p style="color: red; margin-top: 10px;">
-            Error talking to Saleor: {{ saleor_error }}
+            The live catalogue is temporarily unavailable. Please try again later.
         </p>
     {% endif %}
 
@@ -43,7 +43,7 @@
             {% endfor %}
         </div>
     {% else %}
-        {% if not saleor_error %}
+        {% if not catalogue_unavailable %}
             <p>No products found for this channel yet.</p>
         {% endif %}
     {% endif %}

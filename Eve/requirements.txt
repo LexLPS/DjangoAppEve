@@ -1,7 +1,9 @@
-Django==5.2.8
-djangorestframework
-psycopg2-binary
-pymongo
-requests
-python-decouple
-gunicorn
+# Direct dependencies, pinned. Full transitive pins live in requirements.lock;
+# install with: pip install -r requirements.lock
+Django==5.2.16
+djangorestframework==3.16.1
+psycopg2-binary==2.9.11
+pymongo==4.15.4
+requests==2.33.0
+python-decouple==3.8
+gunicorn==26.0.0

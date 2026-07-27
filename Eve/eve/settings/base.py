@@ -51,6 +51,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'core.middleware.SecurityHeadersMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -58,6 +59,19 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# Admin is served from a configurable, non-default path in production
+ADMIN_URL = config("DJANGO_ADMIN_URL", default="admin/")
+
+# --- Explicit cookie policy (secure flags are set in prod.py) ---
+SESSION_COOKIE_HTTPONLY = True          # JS must never read the session
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 14  # 14 days
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+CSRF_COOKIE_HTTPONLY = True             # forms use {% csrf_token %}, no JS access needed
+CSRF_COOKIE_SAMESITE = "Lax"
+X_FRAME_OPTIONS = "DENY"
+SECURE_CONTENT_TYPE_NOSNIFF = True
 
 ROOT_URLCONF = 'eve.urls'
 
@@ -117,8 +131,22 @@ REST_FRAMEWORK = {
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "formatters": {
+        "verbose": {
+            "format": "{asctime} {levelname} {name} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
+    },
     "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        # 4xx/5xx responses and unhandled exceptions
+        "django.request": {"level": "WARNING"},
+        # CSRF failures, DisallowedHost, suspicious operations
+        "django.security": {"level": "WARNING"},
+    },
 }
 
 # Password validation

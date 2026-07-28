@@ -24,6 +24,8 @@ jobs:
           cache-dependency-path: Eve/requirements.lock
       - run: pip install -r requirements.lock
       - run: python manage.py test --settings=eve.settings.test --verbosity=2
+        env:
+          DJANGO_ENV: dev
 
   deploy-check:
     name: Django deploy checks

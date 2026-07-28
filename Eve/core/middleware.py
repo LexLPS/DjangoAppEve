@@ -1,5 +1,90 @@
+import logging
+import time
+import uuid
+
 from django.conf import settings
+from django.db import connection
 from django.http import Http404
+
+from .logging import request_id_var
+
+request_logger = logging.getLogger("eve.requests")
+
+
+class RequestIDMiddleware:
+    """Assign a correlation ID to every request.
+
+    The ID is generated server-side (inbound X-Request-ID is untrusted and
+    ignored), stamped on every log record via RequestIdFilter, and returned
+    as X-Request-ID so users/support can quote it.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        request_id = uuid.uuid4().hex
+        token = request_id_var.set(request_id)
+        try:
+            response = self.get_response(request)
+            response.headers["X-Request-ID"] = request_id
+            return response
+        finally:
+            request_id_var.reset(token)
+
+
+class _QueryStats:
+    def __init__(self):
+        self.count = 0
+        self.seconds = 0.0
+
+    def __call__(self, execute, sql, params, many, context):
+        started = time.monotonic()
+        try:
+            return execute(sql, params, many, context)
+        finally:
+            self.count += 1
+            self.seconds += time.monotonic() - started
+
+
+class RequestMetricsMiddleware:
+    """Emit one structured log event per request: latency, status, and
+    database time/queries. Error rates and latency percentiles are derived
+    from these events in the log platform (see docs/OBSERVABILITY.md)."""
+
+    SKIP_PREFIXES = ("/healthz", "/static/")
+    SLOW_REQUEST_MS = 1000
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path.startswith(self.SKIP_PREFIXES):
+            return self.get_response(request)
+
+        stats = _QueryStats()
+        started = time.monotonic()
+        with connection.execute_wrapper(stats):
+            response = self.get_response(request)
+        duration_ms = round((time.monotonic() - started) * 1000, 1)
+
+        route = getattr(getattr(request, "resolver_match", None), "route", "") or request.path
+        level = logging.WARNING if duration_ms > self.SLOW_REQUEST_MS else logging.INFO
+        request_logger.log(
+            level,
+            "%s %s -> %d in %sms",
+            request.method, route, response.status_code, duration_ms,
+            extra={
+                "event": "http_request",
+                "method": request.method,
+                "route": route,
+                "status": response.status_code,
+                "duration_ms": duration_ms,
+                "db_queries": stats.count,
+                "db_ms": round(stats.seconds * 1000, 1),
+            },
+        )
+        return response
 
 
 class TrustedProxyMiddleware:

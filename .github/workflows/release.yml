@@ -1,0 +1,70 @@
+# Controlled release pipeline: build once, promote through staging to
+# production. Secrets come from GitHub Environments (a managed vault) —
+# never from files in the repository or image.
+#
+# The deploy steps are platform-agnostic placeholders: fill in the registry
+# push and the rollout command for your platform (ECS/Kubernetes/Fly/etc.).
+# Rollouts must be rolling or blue-green, gated on /healthz/ready/, and
+# rollback = redeploy the previous image tag (migrations are always
+# backward-compatible; see docs/RELEASE.md).
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: environment
+        required: true
+
+concurrency: release-${{ inputs.environment }}
+
+jobs:
+  verify:
+    name: Verify (tests + deploy checks)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Eve
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: Eve/requirements.lock
+      - run: pip install -r requirements.lock          # locked install only
+      - run: python manage.py test --settings=eve.settings.test
+      - run: pip install pip-audit && pip-audit -r requirements.lock
+
+  build:
+    name: Build image
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build reproducible image (collectstatic happens in the build)
+        run: docker build -t eve:${{ github.sha }} Eve
+      # - name: Push to registry
+      #   run: |
+      #     docker tag eve:${{ github.sha }} $REGISTRY/eve:${{ github.sha }}
+      #     docker push $REGISTRY/eve:${{ github.sha }}
+
+  deploy:
+    name: Deploy (${{ inputs.environment }})
+    needs: build
+    runs-on: ubuntu-latest
+    # GitHub Environment = secret vault + optional required reviewers
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run release tasks (against ${{ inputs.environment }})
+        run: |
+          echo "1. Apply migrations:        manage.py migrate --noinput"
+          echo "   (backward-compatible only - expand/contract pattern)"
+          echo "2. Ensure Mongo indexes:    manage.py ensure_indexes"
+          echo "3. Retention pass check:    manage.py purge_expired_data"
+          echo "4. Rolling deploy of eve:${{ github.sha }} gated on /healthz/ready/"
+          echo "5. Verify /healthz/ready/ returns 200 on new pods before shifting traffic"
+        # Replace with your platform's commands; secrets like DATABASE
+        # credentials come from the GitHub Environment, not from files.

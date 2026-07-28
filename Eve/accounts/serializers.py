@@ -14,4 +14,7 @@ class ProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Profile
-        fields = ["user", "is_long_term_patient", "hospital_name", "room_number", "preferred_vr_mode"]
+        # Data minimization: hospital_name and room_number are health-adjacent
+        # and deliberately NOT exposed through the API — the server-rendered
+        # profile page is the only place that shows them.
+        fields = ["user", "email_verified", "is_long_term_patient", "preferred_vr_mode"]

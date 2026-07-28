@@ -77,6 +77,10 @@ if CHECKOUT_ENABLED and not config("SALEOR_WEBHOOK_SECRET", default=""):
 # Admin MFA is on by default in production
 ADMIN_REQUIRE_MFA = config("DJANGO_ADMIN_REQUIRE_MFA", default=True, cast=bool)
 
+# Structured JSON logs by default in production
+if config("LOG_FORMAT", default="json") == "json":
+    LOGGING["handlers"]["console"]["formatter"] = "json"
+
 # Real SMTP for password reset / verification mail — fail loudly if absent
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = config("EMAIL_HOST")

@@ -55,6 +55,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'core.middleware.TrustedProxyMiddleware',
+    'core.middleware.RequestIDMiddleware',
+    'core.middleware.RequestMetricsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'core.middleware.SecurityHeadersMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -124,6 +126,10 @@ CHECKOUT_ENABLED = config("CHECKOUT_ENABLED", default=False, cast=bool)
 
 # How long Mongo-cached Saleor products stay fresh before re-fetching
 PRODUCT_CACHE_TTL_SECONDS = config("PRODUCT_CACHE_TTL_SECONDS", default=3600, cast=int)
+
+# --- Data retention (enforced by manage.py purge_expired_data, run daily)
+CONTACT_MESSAGE_RETENTION_DAYS = config("CONTACT_MESSAGE_RETENTION_DAYS", default=365, cast=int)
+ABANDONED_CART_RETENTION_DAYS = config("ABANDONED_CART_RETENTION_DAYS", default=365, cast=int)
 
 # --- Cache / sessions: Redis when REDIS_URL is set, else per-process memory.
 # Production requires REDIS_URL (prod.py) so rate limits, lockouts, and
@@ -217,26 +223,67 @@ REST_FRAMEWORK = {
     },
 }
 
+# LOG_FORMAT=json emits one JSON object per line with correlation IDs
+# (prod default); "console" keeps human-readable output (dev default).
+LOG_FORMAT = config("LOG_FORMAT", default="console")
+LOG_LEVEL = config("LOG_LEVEL", default="INFO")
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "request_id": {"()": "core.logging.RequestIdFilter"},
+        "redact": {"()": "core.logging.SensitiveDataFilter"},
+    },
     "formatters": {
         "verbose": {
-            "format": "{asctime} {levelname} {name} {message}",
+            "format": "{asctime} {levelname} {name} [{request_id}] {message}",
             "style": "{",
         },
+        "json": {"()": "core.logging.JsonFormatter"},
     },
     "handlers": {
-        "console": {"class": "logging.StreamHandler", "formatter": "verbose"},
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "json" if LOG_FORMAT == "json" else "verbose",
+            "filters": ["request_id", "redact"],
+        },
     },
-    "root": {"handlers": ["console"], "level": "INFO"},
+    "root": {"handlers": ["console"], "level": LOG_LEVEL},
     "loggers": {
         # 4xx/5xx responses and unhandled exceptions
         "django.request": {"level": "WARNING"},
         # CSRF failures, DisallowedHost, suspicious operations
         "django.security": {"level": "WARNING"},
+        # One structured event per request (latency, status, db time)
+        "eve.requests": {"level": "INFO"},
     },
 }
+
+# --- Exception monitoring (Sentry): active only when SENTRY_DSN is set.
+# send_default_pii stays False and the scrubber strips cookies and auth
+# headers — no credentials, health data, or payment data may reach Sentry.
+SENTRY_DSN = config("SENTRY_DSN", default="")
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    def _scrub_sentry_event(event, hint):
+        request = event.get("request") or {}
+        request.pop("cookies", None)
+        headers = request.get("headers") or {}
+        for header in ("Authorization", "Cookie", "X-Api-Key", "Saleor-Signature"):
+            headers.pop(header, None)
+        return event
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        environment=config("DJANGO_ENV", default="prod"),
+        send_default_pii=False,
+        traces_sample_rate=config("SENTRY_TRACES_SAMPLE_RATE", default=0.0, cast=float),
+        before_send=_scrub_sentry_event,
+    )
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators

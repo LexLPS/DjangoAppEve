@@ -40,7 +40,27 @@ _session.mount("http://", _adapter)
 
 
 class SaleorAPIError(RuntimeError):
-    pass
+    """Structured Saleor failure.
+
+    The message is composed exclusively of safe metadata — a machine-readable
+    code, the HTTP status, and the content type. Response bodies must never
+    be passed into this exception: everything in it may end up in logs and
+    tracebacks. `detail` is for safe metadata only (e.g. GraphQL error
+    codes), never body excerpts.
+    """
+
+    def __init__(self, code: str, status=None, content_type=None, detail=None):
+        self.code = code
+        self.status = status
+        self.content_type = content_type
+        parts = [f"saleor_error code={code}"]
+        if status is not None:
+            parts.append(f"status={status}")
+        if content_type is not None:
+            parts.append(f"content_type={content_type!r}")
+        if detail:
+            parts.append(f"detail={detail}")
+        super().__init__(" ".join(parts))
 
 
 class SaleorCircuitOpen(SaleorAPIError):
@@ -102,24 +122,25 @@ def _do_request(query: str, variables: dict) -> requests.Response:
 
 
 def _parse_response(response: requests.Response) -> dict:
-    """Validate and decode; error messages carry metadata only, never bodies."""
-    if response.status_code >= 400:
-        raise SaleorAPIError(f"Saleor returned HTTP {response.status_code}")
-
+    """Validate and decode; errors carry metadata only, never bodies."""
+    status = response.status_code
     content_type = response.headers.get("content-type", "")
+
+    if status >= 400:
+        raise SaleorAPIError("http_error", status=status, content_type=content_type)
+
     if "application/json" not in content_type:
-        raise SaleorAPIError(
-            f"Saleor returned non-JSON content-type {content_type!r} "
-            f"({len(response.content)} bytes)"
-        )
+        raise SaleorAPIError("non_json_response", status=status, content_type=content_type)
 
     try:
         payload = response.json()
     except ValueError:
-        raise SaleorAPIError("Saleor response was not valid JSON") from None
+        raise SaleorAPIError(
+            "invalid_json", status=status, content_type=content_type
+        ) from None
 
     if not isinstance(payload, dict):
-        raise SaleorAPIError("Saleor response had unexpected shape")
+        raise SaleorAPIError("unexpected_shape", status=status)
 
     if payload.get("errors"):
         codes = [
@@ -127,11 +148,11 @@ def _parse_response(response: requests.Response) -> dict:
             for e in payload["errors"]
             if isinstance(e, dict)
         ]
-        raise SaleorAPIError(f"Saleor GraphQL errors: codes={codes}")
+        raise SaleorAPIError("graphql_error", status=status, detail=f"codes={codes}")
 
     data = payload.get("data")
     if not isinstance(data, dict):
-        raise SaleorAPIError("Saleor response missing data")
+        raise SaleorAPIError("missing_data", status=status)
     return data
 
 
@@ -142,10 +163,10 @@ def saleor_graphql(query: str, variables: dict, retry: bool = True) -> dict:
     retry=False — a timed-out mutation may have been applied.
     """
     if not SALEOR_GRAPHQL_URL:
-        raise SaleorAPIError("SALEOR_GRAPHQL_URL is not configured in settings.")
+        raise SaleorAPIError("not_configured")
 
     if _circuit_is_open():
-        raise SaleorCircuitOpen("Saleor circuit is open; skipping call")
+        raise SaleorCircuitOpen("circuit_open")
 
     attempts = MAX_ATTEMPTS if retry else 1
     last_error = None
@@ -162,11 +183,11 @@ def saleor_graphql(query: str, variables: dict, retry: bool = True) -> dict:
                 continue
             data = _parse_response(response)
         except requests.Timeout:
-            last_error = SaleorAPIError("Saleor request timed out")
+            last_error = SaleorAPIError("timeout")
             logger.warning("Saleor timeout (attempt %d/%d)", attempt + 1, attempts)
         except requests.RequestException as exc:
             last_error = SaleorAPIError(
-                f"Saleor connection error: {type(exc).__name__}"
+                "connection_error", detail=type(exc).__name__
             )
             logger.warning(
                 "Saleor connection error %s (attempt %d/%d)",
@@ -222,7 +243,7 @@ def fetch_products_from_saleor(first=20):
     try:
         return [edge["node"] for edge in data["products"]["edges"]]
     except (KeyError, TypeError):
-        raise SaleorAPIError("Saleor products response was incomplete") from None
+        raise SaleorAPIError("incomplete_response") from None
 
 
 def fetch_product_by_slug(slug: str):
@@ -238,5 +259,5 @@ def fetch_product_by_slug(slug: str):
     """
     data = saleor_graphql(query, {"slug": slug, "channel": SALEOR_CHANNEL})
     if "product" not in data:
-        raise SaleorAPIError("Saleor product response was incomplete")
+        raise SaleorAPIError("incomplete_response")
     return data["product"]  # can be None if slug not found

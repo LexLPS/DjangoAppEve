@@ -9,9 +9,11 @@ _env = config("DJANGO_ENV", default="prod")
 
 if _env == "dev":
     from .dev import *
+elif _env == "staging":
+    from .staging import *
 elif _env == "prod":
     from .prod import *
 else:
     raise ImproperlyConfigured(
-        f"Unknown DJANGO_ENV value {_env!r}; expected 'dev' or 'prod'."
+        f"Unknown DJANGO_ENV value {_env!r}; expected 'dev', 'staging', or 'prod'."
     )

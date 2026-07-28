@@ -1,24 +1,50 @@
-import hashlib
-import hmac
+import base64
 import json
 import os
 from unittest import skipUnless
 from unittest.mock import patch
 
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from django.contrib.auth.models import User
 from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from .models import Order
+from .services.saleor_webhooks import WebhookSignatureError
 
-WEBHOOK_SECRET = "test-webhook-secret"
+TEST_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+ATTACKER_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+TEST_KID = "saleor-test-key"
 
 
-def _signed(payload: dict, secret: str = WEBHOOK_SECRET):
+def _b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
+
+
+def _jwk(private_key=TEST_PRIVATE_KEY, kid=TEST_KID):
+    numbers = private_key.public_key().public_numbers()
+    return {
+        "kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid,
+        "n": _b64url(numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")),
+        "e": _b64url(numbers.e.to_bytes((numbers.e.bit_length() + 7) // 8, "big")),
+    }
+
+
+TEST_JWKS = {"keys": [_jwk()]}
+
+
+def _signed(payload: dict, private_key=TEST_PRIVATE_KEY, kid=TEST_KID):
     body = json.dumps(payload).encode()
-    signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return body, signature
+    protected = _b64url(json.dumps(
+        {"alg": "RS256", "kid": kid}, separators=(",", ":")
+    ).encode())
+    encoded_payload = _b64url(body)
+    signature = private_key.sign(
+        f"{protected}.{encoded_payload}".encode(), padding.PKCS1v15(), hashes.SHA256()
+    )
+    return body, f"{protected}..{_b64url(signature)}"
 
 
 class CheckoutAuthorizationTests(TestCase):
@@ -111,10 +137,15 @@ class CheckoutFlowTests(TestCase):
                              fetch_redirect_response=False)
 
 
-@override_settings(SALEOR_WEBHOOK_SECRET=WEBHOOK_SECRET)
+@override_settings(SALEOR_GRAPHQL_URL="https://saleor.example.com/graphql/")
 class WebhookTests(TestCase):
     def setUp(self):
         cache.clear()
+        jwks_patch = patch(
+            "payments.services.saleor_webhooks._load_jwks", return_value=TEST_JWKS
+        )
+        jwks_patch.start()
+        self.addCleanup(jwks_patch.stop)
         self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
         self.order = Order.objects.create(
             user=self.user, saleor_order_id="ORD1",
@@ -122,22 +153,22 @@ class WebhookTests(TestCase):
         )
         self.url = reverse("saleor_webhook")
 
-    def _post(self, payload, signature=None, secret=WEBHOOK_SECRET):
-        body, computed = _signed(payload, secret)
+    def _post(self, payload, signature=None, private_key=TEST_PRIVATE_KEY):
+        body, computed = _signed(payload, private_key)
         return self.client.post(
             self.url, data=body, content_type="application/json",
             headers={"Saleor-Signature": signature or computed},
         )
 
     def test_valid_signature_marks_order_paid(self):
-        response = self._post({"event_type": "order_fully_paid",
+        response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "ORD1"}})
         self.assertEqual(response.status_code, 200)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
 
     def test_invalid_signature_rejected(self):
-        response = self._post({"event_type": "order_fully_paid",
+        response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "ORD1"}},
                               signature="0" * 64)
         self.assertEqual(response.status_code, 401)
@@ -145,22 +176,27 @@ class WebhookTests(TestCase):
         self.assertEqual(self.order.status, Order.Status.PENDING)
 
     def test_wrong_secret_rejected(self):
-        body, signature = _signed({"event_type": "order_fully_paid",
-                                   "order": {"id": "ORD1"}}, secret="attacker")
+        body, signature = _signed(
+            {"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}},
+            private_key=ATTACKER_PRIVATE_KEY,
+        )
         response = self.client.post(
             self.url, data=body, content_type="application/json",
             headers={"Saleor-Signature": signature},
         )
         self.assertEqual(response.status_code, 401)
 
-    @override_settings(SALEOR_WEBHOOK_SECRET="")
-    def test_missing_secret_rejects_everything(self):
-        response = self._post({"event_type": "order_fully_paid",
-                               "order": {"id": "ORD1"}})
+    def test_unavailable_jwks_rejects_everything(self):
+        with patch(
+            "payments.services.saleor_webhooks._load_jwks",
+            side_effect=WebhookSignatureError("unavailable"),
+        ):
+            response = self._post({"__typename": "OrderFullyPaid",
+                                   "order": {"id": "ORD1"}})
         self.assertEqual(response.status_code, 401)
 
     def test_redelivery_is_idempotent(self):
-        payload = {"event_type": "order_fully_paid", "order": {"id": "ORD1"}}
+        payload = {"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}}
         self._post(payload)
         response = self._post(payload)  # same event again
         self.assertEqual(response.status_code, 200)
@@ -170,7 +206,7 @@ class WebhookTests(TestCase):
     def test_invalid_state_transition_refused(self):
         self.order.status = Order.Status.REFUNDED
         self.order.save()
-        response = self._post({"event_type": "order_fully_paid",
+        response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "ORD1"}})
         self.assertEqual(response.status_code, 409)
         self.order.refresh_from_db()
@@ -179,21 +215,26 @@ class WebhookTests(TestCase):
     def test_refund_flow(self):
         self.order.status = Order.Status.PAID
         self.order.save()
-        response = self._post({"event_type": "order_refunded",
+        response = self._post({"__typename": "OrderRefunded",
                                "order": {"id": "ORD1"}})
         self.assertEqual(response.status_code, 200)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.REFUNDED)
 
     def test_unknown_order_acknowledged_without_changes(self):
-        response = self._post({"event_type": "order_fully_paid",
+        response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "GHOST"}})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"handled": False})
 
     def test_malformed_payload_rejected(self):
         body = b"not json"
-        signature = hmac.new(WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+        protected = _b64url(json.dumps({"alg": "RS256", "kid": TEST_KID}).encode())
+        encoded_payload = _b64url(body)
+        signed = TEST_PRIVATE_KEY.sign(
+            f"{protected}.{encoded_payload}".encode(), padding.PKCS1v15(), hashes.SHA256()
+        )
+        signature = f"{protected}..{_b64url(signed)}"
         response = self.client.post(
             self.url, data=body, content_type="application/json",
             headers={"Saleor-Signature": signature},
@@ -223,7 +264,10 @@ class OrderOwnershipTests(TestCase):
         self.assertNotContains(response, "SO_BOB_1")
 
 
-@override_settings(CHECKOUT_ENABLED=True, SALEOR_WEBHOOK_SECRET=WEBHOOK_SECRET)
+@override_settings(
+    CHECKOUT_ENABLED=True,
+    SALEOR_GRAPHQL_URL="https://saleor.example.com/graphql/",
+)
 class EndToEndOrderJourneyTests(TestCase):
     """Full journey with Saleor and Mongo mocked at the service boundary:
     register -> add to cart -> checkout -> webhook payment -> paid history,
@@ -231,6 +275,11 @@ class EndToEndOrderJourneyTests(TestCase):
 
     def setUp(self):
         cache.clear()
+        jwks_patch = patch(
+            "payments.services.saleor_webhooks._load_jwks", return_value=TEST_JWKS
+        )
+        jwks_patch.start()
+        self.addCleanup(jwks_patch.stop)
 
     def _register_and_login(self):
         self.client.post(reverse("register"), {
@@ -282,7 +331,7 @@ class EndToEndOrderJourneyTests(TestCase):
         self.assertEqual(order.status, Order.Status.PENDING)
 
         # Payment webhook arrives (twice — duplicate delivery must be a no-op)
-        payload = {"event_type": "order_fully_paid", "order": {"id": "ORD-E2E"}}
+        payload = {"__typename": "OrderFullyPaid", "order": {"id": "ORD-E2E"}}
         body, signature = _signed(payload)
         for _ in range(2):
             response = self.client.post(
@@ -302,7 +351,7 @@ class EndToEndOrderJourneyTests(TestCase):
 
         # Refund webhook completes the lifecycle
         body, signature = _signed(
-            {"event_type": "order_refunded", "order": {"id": "ORD-E2E"}})
+            {"__typename": "OrderRefunded", "order": {"id": "ORD-E2E"}})
         response = self.client.post(
             reverse("saleor_webhook"), data=body,
             content_type="application/json",

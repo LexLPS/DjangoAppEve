@@ -153,17 +153,161 @@ class AdminIPAllowlistTests(TestCase):
 
 
 class HealthCheckTests(TestCase):
-    def test_healthy_when_backends_reachable(self):
+    def test_liveness_has_no_dependencies(self):
+        with patch("ecommerce.services.mongo_client.client") as mongo:
+            mongo.admin.command.side_effect = RuntimeError("db down")
+            response = self.client.get(reverse("liveness"))
+        self.assertEqual(response.status_code, 200)  # process is alive regardless
+        self.assertEqual(response.json(), {"status": "alive"})
+
+    def test_readiness_ok_when_backends_reachable(self):
         with patch("ecommerce.services.mongo_client.client") as mongo:
             mongo.admin.command.return_value = {"ok": 1}
-            response = self.client.get(reverse("health"))
+            response = self.client.get(reverse("readiness"))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        payload = response.json()
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["checks"]["postgresql"], "ok")
+        self.assertEqual(payload["checks"]["cache"], "ok")
+        self.assertIn(payload["saleor_circuit"], ("open", "closed"))
 
-    def test_degraded_without_details_when_mongo_down(self):
+    def test_readiness_degraded_without_details_when_mongo_down(self):
         with patch("ecommerce.services.mongo_client.client") as mongo:
             mongo.admin.command.side_effect = RuntimeError("secret connection detail")
-            response = self.client.get(reverse("health"))
+            response = self.client.get(reverse("readiness"))
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json(), {"status": "degraded"})
+        self.assertEqual(response.json()["checks"]["mongodb"], "fail")
         self.assertNotIn("secret connection detail", response.content.decode())
+
+    def test_saleor_circuit_state_does_not_fail_readiness(self):
+        with patch("ecommerce.services.mongo_client.client") as mongo, \
+             patch("ecommerce.services.saleor_client._circuit_is_open",
+                   return_value=True):
+            mongo.admin.command.return_value = {"ok": 1}
+            response = self.client.get(reverse("readiness"))
+        self.assertEqual(response.status_code, 200)  # Saleor is a soft dependency
+        self.assertEqual(response.json()["saleor_circuit"], "open")
+
+
+class ObservabilityTests(TestCase):
+    def test_every_response_carries_a_unique_request_id(self):
+        first = self.client.get(reverse("landing"))
+        second = self.client.get(reverse("landing"))
+        self.assertTrue(first.headers["X-Request-ID"])
+        self.assertNotEqual(first.headers["X-Request-ID"],
+                            second.headers["X-Request-ID"])
+
+    def test_request_metrics_event_logged_with_latency_and_db_stats(self):
+        with self.assertLogs("eve.requests", level="INFO") as captured:
+            self.client.get(reverse("landing"))
+        record = captured.records[0]
+        self.assertEqual(record.event, "http_request")
+        self.assertEqual(record.status, 200)
+        self.assertGreaterEqual(record.duration_ms, 0)
+        self.assertGreaterEqual(record.db_queries, 0)
+
+    def test_health_probes_are_not_metric_noise(self):
+        with patch("ecommerce.services.mongo_client.client") as mongo:
+            mongo.admin.command.return_value = {"ok": 1}
+            with self.assertNoLogs("eve.requests", level="INFO"):
+                self.client.get(reverse("readiness"))
+
+
+class LogRedactionTests(TestCase):
+    def _formatted(self, message):
+        import logging as pylogging
+
+        from .logging import JsonFormatter, RequestIdFilter, SensitiveDataFilter
+        record = pylogging.LogRecord(
+            "test", pylogging.INFO, __file__, 1, message, (), None
+        )
+        RequestIdFilter().filter(record)
+        SensitiveDataFilter().filter(record)
+        return JsonFormatter().format(record)
+
+    def test_bearer_tokens_and_passwords_redacted(self):
+        output = self._formatted(
+            "retry with Authorization: Bearer sk_live_abc123 password=hunter2"
+        )
+        self.assertNotIn("sk_live_abc123", output)
+        self.assertNotIn("hunter2", output)
+        self.assertIn("[REDACTED]", output)
+
+    def test_session_cookies_and_pans_redacted(self):
+        output = self._formatted(
+            "cookie: sessionid=abc123def card 4111111111111111 declined"
+        )
+        self.assertNotIn("abc123def", output)
+        self.assertNotIn("4111111111111111", output)
+
+    def test_output_is_valid_json_with_correlation_id(self):
+        import json as pyjson
+        payload = pyjson.loads(self._formatted("plain message"))
+        self.assertEqual(payload["message"], "plain message")
+        self.assertEqual(payload["level"], "INFO")
+        self.assertIn("request_id", payload)
+
+    def _formatted_exception(self, formatter, exc_message):
+        import logging as pylogging
+        import sys
+
+        from .logging import RequestIdFilter
+        try:
+            raise RuntimeError(exc_message)
+        except RuntimeError:
+            exc_info = sys.exc_info()
+        record = pylogging.LogRecord(
+            "test", pylogging.ERROR, __file__, 1, "upstream call failed", (),
+            exc_info,
+        )
+        RequestIdFilter().filter(record)
+        return formatter.format(record)
+
+    def test_exception_tracebacks_redacted_in_json_formatter(self):
+        # Exception text bypasses logging filters; the formatter must scrub it
+        from .logging import JsonFormatter
+        output = self._formatted_exception(
+            JsonFormatter(),
+            "refused with Authorization: Bearer sk_live_xyz "
+            "Body starts with: '<html>internal secret'",
+        )
+        self.assertNotIn("sk_live_xyz", output)
+        self.assertNotIn("internal secret", output)
+        self.assertIn("[REDACTED]", output)
+
+    def test_exception_tracebacks_redacted_in_console_formatter(self):
+        from .logging import ConsoleFormatter
+        output = self._formatted_exception(
+            ConsoleFormatter(),
+            "sessionid=abc123def Body starts with: '<html>internal secret'",
+        )
+        self.assertNotIn("abc123def", output)
+        self.assertNotIn("internal secret", output)
+
+
+class RetentionTests(TestCase):
+    def test_purge_expired_data_deletes_only_expired_records(self):
+        from datetime import timedelta
+        from io import StringIO
+        from unittest.mock import MagicMock
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        fresh = ContactMessage.objects.create(
+            name="new", email="new@example.com", subject="s", message="m")
+        stale = ContactMessage.objects.create(
+            name="old", email="old@example.com", subject="s", message="m")
+        ContactMessage.objects.filter(pk=stale.pk).update(
+            created_at=timezone.now() - timedelta(days=400))
+
+        with patch("ecommerce.services.mongo_client.carts_collection") as carts:
+            carts.delete_many.return_value = MagicMock(deleted_count=3)
+            out = StringIO()
+            call_command("purge_expired_data", stdout=out)
+
+        self.assertTrue(ContactMessage.objects.filter(pk=fresh.pk).exists())
+        self.assertFalse(ContactMessage.objects.filter(pk=stale.pk).exists())
+        cutoff_filter = carts.delete_many.call_args.args[0]
+        self.assertIn("$lt", cutoff_filter["updated_at"])
+        self.assertIn("3 abandoned cart(s)", out.getvalue())

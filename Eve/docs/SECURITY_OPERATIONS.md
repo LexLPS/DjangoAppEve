@@ -48,6 +48,54 @@ Two databases hold state; both need backups.
   backup is useless if `DJANGO_SECRET_KEY` is lost — active sessions and
   password-reset tokens are invalidated when it changes.
 
+## Encryption
+
+- **In transit:** enforced by configuration — production refuses plaintext
+  backends (Postgres `sslmode=require`, Mongo `mongodb+srv`/`tls=true`,
+  Saleor https, Redis `rediss://` recommended and mandatory across network
+  boundaries). Client → LB is TLS with HSTS.
+- **At rest:** enable storage-level encryption on all three databases
+  (managed-provider default or LUKS/dm-crypt self-hosted).
+- **Backups:** encrypt before leaving the host — `pg_dump | age -r <key>`
+  (or gpg), same for `mongodump` archives. Store keys in the vault, not
+  beside the backups.
+
+## Recovery objectives and restore testing
+
+- **RPO (max data loss): 24 h** with nightly dumps; reduce to ≤ 5 min for
+  PostgreSQL by enabling WAL archiving / point-in-time recovery on the
+  managed provider before real payment volume.
+- **RTO (max downtime): 4 h** — restore both databases, redeploy the last
+  known-good image, verify probes.
+- **Quarterly restore test (both engines, on a scratch host):**
+  1. `pg_restore --dbname=eve_restore_test <latest dump>`; verify row counts
+     for `auth_user`, `accounts_profile`, `payments_order`,
+     `accounts_privacyactionlog` against production ±1 day.
+  2. `mongorestore --nsInclude 'EVEDB.carts' <latest archive>`; verify cart
+     count and one spot-checked document.
+  3. Point a staging app instance at the restored databases;
+     `/healthz/ready/` must return 200 and a test login must succeed.
+  4. Record date, dump used, durations (vs RTO), and any gaps. A restore
+     that was never tested is not a backup.
+
+## Credential rotation runbook
+
+Rotate on schedule (yearly), on staff departure, and immediately on any
+suspicion of exposure. Order matters:
+
+1. `DJANGO_SECRET_KEY` — generate, deploy, rolling restart. Invalidates all
+   sessions and pending reset/verification tokens (users re-login).
+2. `DB_PASSWORD`, `MONGODB_URI` credentials, Redis auth — create the new
+   credential, deploy, rolling restart, then revoke the old one (zero
+   downtime; old credential stays valid during the roll).
+3. `SALEOR_API_TOKEN` — rotate in Saleor first, deploy the new value, then
+   verify one API request. Saleor rotates webhook signing keys through its
+   JWKS; Eve refreshes the cached keys automatically.
+4. `EMAIL_HOST_PASSWORD`, `SENTRY_DSN` — rotate at the provider, deploy.
+
+After any rotation: confirm `/healthz/ready/`, one login, one webhook, and
+record the rotation (date, secrets touched, operator).
+
 ## Redis
 
 Redis backs the Django cache, rate-limit/lockout counters, and cached
@@ -77,13 +125,32 @@ all of the following, in order:
 
 1. Configure `SALEOR_GRAPHQL_URL`, `SALEOR_API_TOKEN`, and channel against
    the production Saleor instance.
-2. Create a Saleor webhook for order events (fully paid, payment failed,
-   refunded, cancelled) pointing at `/payments/webhooks/saleor/` with a
-   strong `secretKey`; set the same value as `SALEOR_WEBHOOK_SECRET`.
+2. Create a Saleor webhook for order events (fully paid, fully refunded,
+   refunded, cancelled) pointing at `/payments/webhooks/saleor/`. Leave the
+   deprecated `secretKey` unset so Saleor sends a detached RS256 JWS. Eve
+   derives `/.well-known/jwks.json` from `SALEOR_GRAPHQL_URL`; set
+   `SALEOR_JWKS_URL` only when an explicit override is required.
+   Use a subscription payload that includes the signed GraphQL type name:
+
+   ```graphql
+   subscription {
+     event {
+       __typename
+       ... on OrderFullyPaid { order { id } }
+       ... on OrderRefunded { order { id } }
+       ... on OrderFullyRefunded { order { id } }
+       ... on OrderCancelled { order { id } }
+     }
+   }
+   ```
+
+   Subscribe to `ORDER_FULLY_PAID`, `ORDER_REFUNDED`,
+   `ORDER_FULLY_REFUNDED`, and `ORDER_CANCELLED`. Eve intentionally derives
+   the transition from the signed `__typename` body field rather than an
+   unsigned request header.
 3. Run the integration suite against that instance and require green:
    `SALEOR_INTEGRATION=1 python manage.py test payments`
-4. Set `CHECKOUT_ENABLED=True` (production refuses this without the webhook
-   secret) and verify one real end-to-end order, its webhook state change to
+4. Set `CHECKOUT_ENABLED=True` and verify one real end-to-end order, its webhook state change to
    `paid`, and a refund round-trip before announcing availability.
 
 ## Admin protection
@@ -120,18 +187,32 @@ GDPR — hosting and processors need a DPA, and data minimization applies.
   hash), `accounts_profile` (patient status, hospital, room), `payments_order`
   (purchase history), `core_contactmessage` (name, email, free text).
   MongoDB: `carts` (user id + items). Logs: IPs and paths, no bodies.
+- **Data minimization:** hospital and room fields are excluded from the API
+  (server-rendered profile page only), never logged, and should be left
+  blank unless care delivery actually requires them. Challenge any new
+  patient-related field before adding it.
 - **Deletion requests (right to erasure):** run
-  `python manage.py purge_user <username> --yes` — deletes the user, profile,
-  and orders (FK cascade) and the MongoDB cart in one step. Verify the user's
-  email no longer appears in `core_contactmessage`; delete those rows manually
-  if the requester asks. Complete within 30 days of the request.
-- **Access/export requests:** query the tables in the inventory for the
-  user's records and provide them in a readable format (JSON/CSV). Log the
-  request and completion date.
-- **Retention:** purge `core_contactmessage` rows older than 12 months;
-  MongoDB carts untouched for 12 months can be deleted. Orders follow
-  commercial/tax retention law (typically 6–10 years) — they survive account
-  deletion only if law requires it; otherwise they cascade.
+  `python manage.py purge_user <username> --yes --performed-by <operator>` —
+  deletes the user, profile, and orders (FK cascade) and the MongoDB cart in
+  one step, and writes an entry to the privacy audit log
+  (`accounts_privacyactionlog`). Verify the user's email no longer appears
+  in `core_contactmessage`; delete those rows manually if the requester
+  asks. Complete within 30 days of the request.
+- **Access/export requests:** run
+  `python manage.py export_user <username> --performed-by <operator>` —
+  outputs all held personal data (account, profile, orders, contact
+  messages, cart) as JSON and records the export in the privacy audit log.
+  Deliver securely; never by plain email attachment.
+- **Retention (automated):** `python manage.py purge_expired_data` deletes
+  contact messages and abandoned carts past their retention windows
+  (`CONTACT_MESSAGE_RETENTION_DAYS` / `ABANDONED_CART_RETENTION_DAYS`,
+  default 365). **Schedule it daily** (cron or a scheduled CI job) and alert
+  if a day is missed. Orders follow commercial/tax retention law (typically
+  6–10 years) — they survive account deletion only if law requires it;
+  otherwise they cascade.
+- **Audit:** every export/deletion is recorded in
+  `accounts_privacyactionlog` (action, subject, operator, timestamp — never
+  the exported content). Review the log during the quarterly access review.
 - **Breach response:** if personal data may have been exposed — rotate
   `DJANGO_SECRET_KEY`, all DB credentials, and the Saleor token; force
   password resets; preserve logs; assess scope. GDPR requires notifying the

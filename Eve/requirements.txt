@@ -8,5 +8,7 @@ pymongo==4.15.4
 qrcode==8.2
 redis==8.0.1
 requests==2.33.0
+cryptography==49.0.0
 python-decouple==3.8
 gunicorn==26.0.0
+sentry-sdk==2.66.1

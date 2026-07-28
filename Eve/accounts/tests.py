@@ -257,3 +257,65 @@ class ObjectOwnershipTests(TestCase):
         self.assertEqual(response.status_code, 405)  # read-only viewset
         response = self.client.delete(f"/api/profile/{self.alice_profile.pk}/")
         self.assertEqual(response.status_code, 405)
+
+    def test_api_never_exposes_health_adjacent_fields(self):
+        # Data minimization: hospital and room stay out of the API entirely
+        self.client.force_login(self.alice)
+        payload = self.client.get("/api/profile/").json()["results"][0]
+        self.assertNotIn("hospital_name", payload)
+        self.assertNotIn("room_number", payload)
+
+
+class PrivacyWorkflowTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+        Profile.objects.create(user=self.user, hospital_name="St. Mary")
+
+    def test_export_user_outputs_data_and_writes_audit_log(self):
+        from io import StringIO
+        from unittest.mock import patch
+
+        from django.core.management import call_command
+
+        from .models import PrivacyActionLog
+
+        with patch("ecommerce.services.mongo_client.carts_collection") as carts:
+            carts.find_one.return_value = None
+            out = StringIO()
+            call_command("export_user", "alice", "--performed-by", "dpo", stdout=out)
+
+        exported = out.getvalue()
+        self.assertIn("alice@example.com", exported)
+        self.assertIn("St. Mary", exported)
+        log = PrivacyActionLog.objects.get()
+        self.assertEqual(log.action, "export")
+        self.assertEqual(log.username, "alice")
+        self.assertEqual(log.performed_by, "dpo")
+
+    def test_purge_user_deletes_everywhere_and_writes_audit_log(self):
+        from io import StringIO
+        from unittest.mock import MagicMock, patch
+
+        from django.core.management import call_command
+
+        from .models import PrivacyActionLog
+
+        with patch("ecommerce.services.mongo_client.carts_collection") as carts:
+            carts.delete_many.return_value = MagicMock(deleted_count=1)
+            call_command("purge_user", "alice", "--yes",
+                         "--performed-by", "dpo", stdout=StringIO())
+
+        self.assertFalse(User.objects.filter(username="alice").exists())
+        carts.delete_many.assert_called_once_with({"user_id": self.user.id})
+        log = PrivacyActionLog.objects.get()
+        self.assertEqual(log.action, "delete")
+        self.assertEqual(log.performed_by, "dpo")
+
+    def test_purge_user_refuses_without_confirmation(self):
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            call_command("purge_user", "alice", "--performed-by", "dpo")
+        self.assertTrue(User.objects.filter(username="alice").exists())

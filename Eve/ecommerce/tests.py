@@ -56,10 +56,7 @@ class XssTests(TestCase):
 
 class UpstreamErrorTests(TestCase):
     def test_saleor_failure_shows_generic_message_only(self):
-        error = SaleorAPIError(
-            "Saleor endpoint did not return JSON (content-type=text/html). "
-            "Body starts with: '<html>internal secret'"
-        )
+        error = SaleorAPIError("non_json_response", status=502, content_type="text/html")
         with patch("ecommerce.views.get_cached_products", return_value=[]), \
              patch("ecommerce.views.fetch_products_from_saleor", side_effect=error), \
              patch("ecommerce.views.cache_product"):
@@ -67,8 +64,8 @@ class UpstreamErrorTests(TestCase):
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
         self.assertIn("temporarily unavailable", html)
-        self.assertNotIn("internal secret", html)
-        self.assertNotIn("content-type", html)
+        self.assertNotIn("saleor_error", html)
+        self.assertNotIn("content_type", html)
 
     def test_invalid_external_products_are_dropped(self):
         bad = [{"id": None}, {"name": "no id or slug"}, "not-a-dict"]
@@ -164,14 +161,16 @@ class SaleorClientResilienceTests(TestCase):
                           side_effect=requests.Timeout("slow")):
             with self.assertRaises(SaleorAPIError) as ctx:
                 saleor_client.saleor_graphql("query {}", {})
-        self.assertIn("timed out", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "timeout")
 
     def test_http_error_status_reported_without_body(self):
         response = _mock_response(status=500, body=b"<html>stack trace secret</html>")
         with patch.object(saleor_client._session, "post", return_value=response):
             with self.assertRaises(SaleorAPIError) as ctx:
                 saleor_client.saleor_graphql("query {}", {}, retry=False)
-        self.assertIn("HTTP 500", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "http_error")
+        self.assertEqual(ctx.exception.status, 500)
+        self.assertIn("status=500", str(ctx.exception))
         self.assertNotIn("secret", str(ctx.exception))
 
     def test_non_json_content_type_reported_without_body(self):
@@ -180,6 +179,9 @@ class SaleorClientResilienceTests(TestCase):
         with patch.object(saleor_client._session, "post", return_value=response):
             with self.assertRaises(SaleorAPIError) as ctx:
                 saleor_client.saleor_graphql("query {}", {}, retry=False)
+        # Structured metadata only: code, status, content type — never bodies
+        self.assertEqual(ctx.exception.code, "non_json_response")
+        self.assertEqual(ctx.exception.content_type, "text/html")
         self.assertNotIn("secret", str(ctx.exception))
 
     def test_invalid_json_rejected(self):
@@ -187,7 +189,7 @@ class SaleorClientResilienceTests(TestCase):
         with patch.object(saleor_client._session, "post", return_value=response):
             with self.assertRaises(SaleorAPIError) as ctx:
                 saleor_client.saleor_graphql("query {}", {}, retry=False)
-        self.assertIn("not valid JSON", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, "invalid_json")
 
     def test_graphql_errors_report_codes_not_messages(self):
         response = _mock_response(json_data={"errors": [

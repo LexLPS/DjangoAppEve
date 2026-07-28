@@ -95,14 +95,15 @@ def verify_saleor_signature(raw_body: bytes, signature: str) -> None:
         raise WebhookSignatureError("invalid protected header") from exc
     if not isinstance(protected, dict) or protected.get("alg") != "RS256":
         raise WebhookSignatureError("unsupported signature algorithm")
-    if protected.get("b64", True) is not True or "crit" in protected:
+    # Saleor uses RFC 7797 detached JWS: the payload is not base64 encoded and
+    # the protected header marks ``b64`` as critical.
+    if protected.get("b64") is not False or protected.get("crit") != ["b64"]:
         raise WebhookSignatureError("unsupported JWS protected header")
     kid = protected.get("kid")
     if not isinstance(kid, str) or not kid or len(kid) > 256:
         raise WebhookSignatureError("missing signing key id")
 
-    encoded_payload = base64.urlsafe_b64encode(raw_body).rstrip(b"=")
-    signed_data = protected_b64.encode("ascii") + b"." + encoded_payload
+    signed_data = protected_b64.encode("ascii") + b"." + raw_body
     signature_bytes = _b64url_decode(signature_b64)
 
     for force_refresh in (False, True):

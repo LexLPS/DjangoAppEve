@@ -62,6 +62,22 @@ class AuthenticationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(User.objects.filter(username="mallory").exists())
 
+    def test_registration_rejects_duplicate_email_case_insensitive(self):
+        response = self.client.post(reverse("register"), {
+            "username": "mallory",
+            "email": "ALICE@example.com",  # alice@example.com already exists
+            "password1": "S3curePass!x",
+            "password2": "S3curePass!x",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "already exists")
+        self.assertFalse(User.objects.filter(username="mallory").exists())
+
+    def test_database_enforces_unique_email_even_outside_forms(self):
+        from django.db import IntegrityError
+        with self.assertRaises(IntegrityError):
+            User.objects.create_user("alice2", "Alice@Example.com", "S3curePass!x")
+
     def test_registration_throttled_after_repeated_attempts(self):
         for _ in range(5):
             self.client.post(reverse("register"), {})

@@ -79,8 +79,10 @@ class CheckoutFlowTests(TestCase):
     """Server-side checkout: Saleor totals only, idempotent order creation."""
 
     def setUp(self):
+        from accounts.models import Profile
         cache.clear()
         self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+        Profile.objects.create(user=self.user, email_verified=True)
         self.client.force_login(self.user)
         self.cart = {
             "user_id": self.user.id,
@@ -135,6 +137,17 @@ class CheckoutFlowTests(TestCase):
         self.assertEqual(Order.objects.count(), 0)
         self.assertRedirects(response, reverse("checkout"),
                              fetch_redirect_response=False)
+
+    def test_unverified_email_cannot_place_orders(self):
+        from accounts.models import Profile
+        Profile.objects.filter(user=self.user).update(email_verified=False)
+        with patch("payments.views.get_cart", return_value=self.cart), \
+             patch("payments.views.create_checkout") as create_mock:
+            response = self.client.post(reverse("checkout"))
+        self.assertRedirects(response, reverse("profile"),
+                             fetch_redirect_response=False)
+        self.assertEqual(Order.objects.count(), 0)
+        create_mock.assert_not_called()
 
 
 @override_settings(SALEOR_GRAPHQL_URL="https://saleor.example.com/graphql/")
@@ -289,8 +302,17 @@ class EndToEndOrderJourneyTests(TestCase):
         })  # register logs the user in
 
     def test_full_purchase_refund_and_redelivery(self):
+        import re
+
+        from django.core import mail
+
         self._register_and_login()
         user = User.objects.get(username="carol")
+
+        # Verify the email address (required before checkout, R9)
+        link = re.search(r"(/accounts/verify-email/[^\s]+)", mail.outbox[0].body)
+        self.assertIsNotNone(link)
+        self.assertEqual(self.client.get(link.group(1)).status_code, 200)
 
         product = {
             "id": "P1", "name": "Eve Horizon", "slug": "eve-horizon",

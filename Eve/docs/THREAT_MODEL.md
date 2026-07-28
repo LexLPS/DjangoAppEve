@@ -146,8 +146,17 @@ Implemented on this branch after the initial assessment:
   missing records for matched users. Run daily; alert on mismatches.
 - **R5** — crossing the lockout threshold emails the account owner once
   per window (silent for nonexistent usernames — no enumeration signal).
+- **R9** — checkout (when enabled) refuses to place orders until the
+  account's email is verified; the receipt address is therefore always
+  confirmed.
+- **R10** — one account per email address, case-insensitive: validated in
+  the registration form and enforced by a partial unique index on
+  `LOWER(email)`. The existence signal the form error reveals is bounded
+  by the registration rate limit.
 
-Still open: R6–R10 (see register above).
+Still open: R6 (payment gateway — gated by the go-live runbook), R7
+(restrict readiness endpoint at the proxy), R8 (digest-pin base image,
+container scanning).
 
 ## 8. Explicitly accepted risks
 

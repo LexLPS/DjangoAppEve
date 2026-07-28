@@ -38,11 +38,11 @@ TEST_JWKS = {"keys": [_jwk()]}
 def _signed(payload: dict, private_key=TEST_PRIVATE_KEY, kid=TEST_KID):
     body = json.dumps(payload).encode()
     protected = _b64url(json.dumps(
-        {"alg": "RS256", "kid": kid}, separators=(",", ":")
+        {"alg": "RS256", "kid": kid, "b64": False, "crit": ["b64"]},
+        separators=(",", ":"),
     ).encode())
-    encoded_payload = _b64url(body)
     signature = private_key.sign(
-        f"{protected}.{encoded_payload}".encode(), padding.PKCS1v15(), hashes.SHA256()
+        protected.encode() + b"." + body, padding.PKCS1v15(), hashes.SHA256()
     )
     return body, f"{protected}..{_b64url(signature)}"
 
@@ -229,10 +229,11 @@ class WebhookTests(TestCase):
 
     def test_malformed_payload_rejected(self):
         body = b"not json"
-        protected = _b64url(json.dumps({"alg": "RS256", "kid": TEST_KID}).encode())
-        encoded_payload = _b64url(body)
+        protected = _b64url(json.dumps({
+            "alg": "RS256", "kid": TEST_KID, "b64": False, "crit": ["b64"],
+        }).encode())
         signed = TEST_PRIVATE_KEY.sign(
-            f"{protected}.{encoded_payload}".encode(), padding.PKCS1v15(), hashes.SHA256()
+            protected.encode() + b"." + body, padding.PKCS1v15(), hashes.SHA256()
         )
         signature = f"{protected}..{_b64url(signed)}"
         response = self.client.post(

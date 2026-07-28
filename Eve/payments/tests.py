@@ -79,8 +79,10 @@ class CheckoutFlowTests(TestCase):
     """Server-side checkout: Saleor totals only, idempotent order creation."""
 
     def setUp(self):
+        from accounts.models import Profile
         cache.clear()
         self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+        Profile.objects.create(user=self.user, email_verified=True)
         self.client.force_login(self.user)
         self.cart = {
             "user_id": self.user.id,
@@ -135,6 +137,17 @@ class CheckoutFlowTests(TestCase):
         self.assertEqual(Order.objects.count(), 0)
         self.assertRedirects(response, reverse("checkout"),
                              fetch_redirect_response=False)
+
+    def test_unverified_email_cannot_place_orders(self):
+        from accounts.models import Profile
+        Profile.objects.filter(user=self.user).update(email_verified=False)
+        with patch("payments.views.get_cart", return_value=self.cart), \
+             patch("payments.views.create_checkout") as create_mock:
+            response = self.client.post(reverse("checkout"))
+        self.assertRedirects(response, reverse("profile"),
+                             fetch_redirect_response=False)
+        self.assertEqual(Order.objects.count(), 0)
+        create_mock.assert_not_called()
 
 
 @override_settings(SALEOR_GRAPHQL_URL="https://saleor.example.com/graphql/")
@@ -289,8 +302,17 @@ class EndToEndOrderJourneyTests(TestCase):
         })  # register logs the user in
 
     def test_full_purchase_refund_and_redelivery(self):
+        import re
+
+        from django.core import mail
+
         self._register_and_login()
         user = User.objects.get(username="carol")
+
+        # Verify the email address (required before checkout, R9)
+        link = re.search(r"(/accounts/verify-email/[^\s]+)", mail.outbox[0].body)
+        self.assertIsNotNone(link)
+        self.assertEqual(self.client.get(link.group(1)).status_code, 200)
 
         product = {
             "id": "P1", "name": "Eve Horizon", "slug": "eve-horizon",
@@ -361,6 +383,67 @@ class EndToEndOrderJourneyTests(TestCase):
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.REFUNDED)
+
+
+class ReconcileOrdersTests(TestCase):
+    """R4: orders Saleor knows about but Eve doesn't must be surfaced."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+        Order.objects.create(
+            user=self.user, saleor_order_id="ORD-KNOWN",
+            total_amount="10.00", currency="EUR", status=Order.Status.PENDING,
+        )
+
+    def _saleor_orders(self, nodes):
+        return {"orders": {"edges": [{"node": n} for n in nodes]}}
+
+    def test_clean_when_all_orders_known(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        payload = self._saleor_orders([{"id": "ORD-KNOWN", "userEmail": "alice@example.com",
+                                        "total": {"gross": {"amount": 10, "currency": "EUR"}}}])
+        out = StringIO()
+        with patch("payments.management.commands.reconcile_orders.saleor_graphql",
+                   return_value=payload):
+            call_command("reconcile_orders", stdout=out)
+        self.assertIn("Reconciliation clean", out.getvalue())
+
+    def test_reports_missing_order_and_fixes_with_flag(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        payload = self._saleor_orders([
+            {"id": "ORD-LOST", "userEmail": "ALICE@example.com",  # case-insensitive match
+             "total": {"gross": {"amount": 49.99, "currency": "EUR"}}},
+            {"id": "ORD-GHOST", "userEmail": "nobody@example.com",
+             "total": {"gross": {"amount": 5, "currency": "EUR"}}},
+        ])
+        out = StringIO()
+        with patch("payments.management.commands.reconcile_orders.saleor_graphql",
+                   return_value=payload):
+            call_command("reconcile_orders", "--fix", stdout=out)
+        output = out.getvalue()
+        self.assertIn("MISSING ORD-LOST", output)
+        self.assertIn("MISSING ORD-GHOST", output)
+        # Matched user recreated as pending; unmatched left for manual review
+        lost = Order.objects.get(saleor_order_id="ORD-LOST")
+        self.assertEqual(lost.user, self.user)
+        self.assertEqual(lost.status, Order.Status.PENDING)
+        self.assertFalse(Order.objects.filter(saleor_order_id="ORD-GHOST").exists())
+
+    def test_without_fix_nothing_is_created(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        payload = self._saleor_orders([{"id": "ORD-LOST", "userEmail": "alice@example.com",
+                                        "total": {"gross": {"amount": 1, "currency": "EUR"}}}])
+        with patch("payments.management.commands.reconcile_orders.saleor_graphql",
+                   return_value=payload):
+            call_command("reconcile_orders", stdout=StringIO())
+        self.assertFalse(Order.objects.filter(saleor_order_id="ORD-LOST").exists())
 
 
 @skipUnless(os.environ.get("SALEOR_INTEGRATION") == "1",

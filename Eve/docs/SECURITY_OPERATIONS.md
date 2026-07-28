@@ -23,6 +23,9 @@ this document covers what must be done around it.
 - **Dependency audit:** run `pip-audit -r requirements.lock` at least monthly
   and on every dependency change (ideally in CI). Upgrade and re-lock when
   advisories appear.
+- **Order reconciliation:** run `python manage.py reconcile_orders` daily
+  (alongside `purge_expired_data`); alert whenever it reports orders that
+  exist in Saleor but not locally, and investigate before running `--fix`.
 
 ## Backups
 

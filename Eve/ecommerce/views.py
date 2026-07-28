@@ -2,6 +2,7 @@ import logging
 from urllib.parse import urlparse
 
 from django.contrib.auth.decorators import login_required
+from django.core.cache import cache
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_POST
@@ -127,8 +128,24 @@ def product_catalogue_view(request):
     return render(request, "ecommerce/product_catalogue.html", context)
 
 
+# Negative cache for unknown slugs (threat model R3): without it every
+# GET for a random slug costs one Saleor API call — an unauthenticated
+# amplification vector against the upstream quota.
+NEGATIVE_CACHE_SECONDS = 300
+
+
 def _get_product_or_404(slug: str) -> dict:
-    """Fresh cache first, then Saleor; validates before caching/returning."""
+    """Fresh cache first, then Saleor; validates before caching/returning.
+    Slug misses are negatively cached."""
+    miss_key = f"product-miss:{slug}"
+    try:
+        if cache.get(miss_key):
+            raise Http404("Product not found")
+    except Http404:
+        raise
+    except Exception:
+        logger.exception("Negative cache unavailable")
+
     cached = get_cached_product(slug)
     if cached and _is_valid_product(cached):
         return _sanitize_product(cached)
@@ -140,6 +157,10 @@ def _get_product_or_404(slug: str) -> dict:
         raise Http404("Product not available at the moment") from None
 
     if not _is_valid_product(product):
+        try:
+            cache.set(miss_key, True, timeout=NEGATIVE_CACHE_SECONDS)
+        except Exception:
+            logger.exception("Negative cache unavailable")
         raise Http404("Product not found")
 
     product = _sanitize_product(product)

@@ -30,6 +30,18 @@ def checkout_view(request):
             return HttpResponseNotAllowed(["GET"])
         return render(request, "payments/checkout.html", {"checkout_enabled": False})
 
+    # Orders go to the address on file — it must be verified first (threat
+    # model R9); the checkout email is also what Saleor sends receipts to.
+    from accounts.models import Profile
+    profile, _ = Profile.objects.get_or_create(user=request.user)
+    if not profile.email_verified:
+        messages.error(
+            request,
+            "Please verify your email address before placing an order. "
+            "You can resend the verification email from your profile.",
+        )
+        return redirect("profile")
+
     if request.method != "POST":
         # A fresh idempotency key per checkout page view: double-submits of
         # the same form can only ever produce one order.

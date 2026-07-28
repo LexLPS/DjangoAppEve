@@ -77,6 +77,41 @@ class UpstreamErrorTests(TestCase):
         cache_mock.assert_not_called()
 
 
+class NegativeCacheTests(TestCase):
+    """R3: repeated requests for unknown slugs must not repeatedly hit
+    Saleor."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_unknown_slug_hits_saleor_only_once(self):
+        with patch("ecommerce.views.get_cached_product", return_value=None), \
+             patch("ecommerce.views.fetch_product_by_slug",
+                   return_value=None) as fetch:
+            first = self.client.get(reverse("product_detail", args=["ghost"]))
+            second = self.client.get(reverse("product_detail", args=["ghost"]))
+        self.assertEqual(first.status_code, 404)
+        self.assertEqual(second.status_code, 404)
+        fetch.assert_called_once()  # second request served from negative cache
+
+    def test_negative_cache_does_not_block_other_slugs(self):
+        with patch("ecommerce.views.get_cached_product", return_value=None), \
+             patch("ecommerce.views.fetch_product_by_slug",
+                   return_value=None) as fetch:
+            self.client.get(reverse("product_detail", args=["ghost-a"]))
+            self.client.get(reverse("product_detail", args=["ghost-b"]))
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_valid_product_not_negatively_cached(self):
+        with patch("ecommerce.views.get_cached_product", return_value=None), \
+             patch("ecommerce.views.fetch_product_by_slug",
+                   return_value=make_product()), \
+             patch("ecommerce.views.cache_product"):
+            response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(cache.get("product-miss:eve-horizon"))
+
+
 class CartInputValidationTests(TestCase):
     def setUp(self):
         cache.clear()

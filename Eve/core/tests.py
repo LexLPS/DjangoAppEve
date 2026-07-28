@@ -162,6 +162,51 @@ class SharedCacheRateLimitTests(TestCase):
         self.assertEqual(response.status_code, 429)
 
 
+class SafeJSONSerializerTests(TestCase):
+    """Redis cache values must round-trip as JSON, never pickle (R2)."""
+
+    def setUp(self):
+        from .cache import SafeJSONSerializer
+        self.serializer = SafeJSONSerializer()
+
+    def test_round_trips_json_shapes(self):
+        for value in ({"a": [1, 2]}, "text", True, None, 3.5, ["x"]):
+            self.assertEqual(
+                self.serializer.loads(self.serializer.dumps(value)), value)
+
+    def test_integers_pass_through_raw_for_incr(self):
+        self.assertEqual(self.serializer.dumps(7), 7)  # not bytes: INCR-able
+        self.assertEqual(self.serializer.loads(b"7"), 7)
+
+    def test_booleans_are_not_treated_as_raw_integers(self):
+        dumped = self.serializer.dumps(True)
+        self.assertIsInstance(dumped, bytes)
+        self.assertIs(self.serializer.loads(dumped), True)
+
+    def test_never_deserializes_pickle(self):
+        import pickle
+        # Pickle bytes are rejected as malformed JSON, never executed
+        with self.assertRaises(ValueError):
+            self.serializer.loads(pickle.dumps({"evil": True}))
+
+
+class TrustedProxyDeployCheckTests(TestCase):
+    """R1: unset TRUSTED_PROXIES must fail the deploy check, not silently
+    collapse per-IP throttling into one shared bucket."""
+
+    def test_warns_when_unset(self):
+        from .checks import trusted_proxies_configured
+        with override_settings(TRUSTED_PROXIES=[]):
+            warnings = trusted_proxies_configured(None)
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0].id, "eve.W001")
+
+    def test_silent_when_configured(self):
+        from .checks import trusted_proxies_configured
+        with override_settings(TRUSTED_PROXIES=["100.64.0.0/10"]):
+            self.assertEqual(trusted_proxies_configured(None), [])
+
+
 class AdminIPAllowlistTests(TestCase):
     @override_settings(ADMIN_ALLOWED_IPS=["203.0.113.10"])
     def test_admin_hidden_from_unlisted_ips(self):

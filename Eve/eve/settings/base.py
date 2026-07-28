@@ -116,12 +116,14 @@ SALEOR_GRAPHQL_URL = config("SALEOR_GRAPHQL_URL", default="")
 SALEOR_CHANNEL = config("SALEOR_CHANNEL", default="default-channel")
 SALEOR_API_TOKEN = config("SALEOR_API_TOKEN", default="")
 
-# Shared secret for verifying Saleor webhook signatures (HMAC-SHA256)
-SALEOR_WEBHOOK_SECRET = config("SALEOR_WEBHOOK_SECRET", default="")
+# Saleor signs webhook bodies as detached RS256 JWS. When unset, the JWKS URL
+# is derived from SALEOR_GRAPHQL_URL's origin.
+SALEOR_JWKS_URL = config("SALEOR_JWKS_URL", default="")
+SALEOR_JWKS_CACHE_SECONDS = config("SALEOR_JWKS_CACHE_SECONDS", default=3600, cast=int)
 
 # Checkout stays disabled until the Saleor integration tests pass against a
 # real instance (see payments/tests.py::SaleorIntegrationTests). Flip only
-# after that, and only with SALEOR_WEBHOOK_SECRET configured.
+# after that, and only with a reachable Saleor JWKS endpoint.
 CHECKOUT_ENABLED = config("CHECKOUT_ENABLED", default=False, cast=bool)
 
 # How long Mongo-cached Saleor products stay fresh before re-fetching
@@ -236,10 +238,8 @@ LOGGING = {
         "redact": {"()": "core.logging.SensitiveDataFilter"},
     },
     "formatters": {
-        "verbose": {
-            "format": "{asctime} {levelname} {name} [{request_id}] {message}",
-            "style": "{",
-        },
+        # Both formatters scrub exception blocks, which bypass log filters
+        "verbose": {"()": "core.logging.ConsoleFormatter"},
         "json": {"()": "core.logging.JsonFormatter"},
     },
     "handlers": {

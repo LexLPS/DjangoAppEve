@@ -57,7 +57,7 @@ Vault) at runtime — and are injected as environment variables. Rules:
    connections, Redis pool, worker saturation).
 2. **Final security review:** re-run the full CI security gates; verify the
    go-live checklist — checkout enablement runbook completed (integration
-   tests green against production Saleor, webhook secret set), admin MFA
+   tests green against production Saleor, RS256 webhook round-trip verified), admin MFA
    devices provisioned, `audit_admins` clean, backups + restore test done
    within the last quarter, alerting wired to a paged channel, secrets
    rotated out of any pre-launch values, and a penetration test or external

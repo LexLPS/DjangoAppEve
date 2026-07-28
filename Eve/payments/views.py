@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import json
 import logging
 import uuid
@@ -7,7 +5,7 @@ import uuid
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.csrf import csrf_exempt
@@ -16,6 +14,7 @@ from ecommerce.services.cart_service import clear_cart, get_cart
 
 from .models import Order
 from .services.saleor_checkout import CheckoutError, complete_checkout, create_checkout
+from .services.saleor_webhooks import WebhookSignatureError, verify_saleor_signature
 
 logger = logging.getLogger(__name__)
 
@@ -79,65 +78,62 @@ def checkout_view(request):
     return redirect("payment_history")
 
 
-def _verify_webhook_signature(request) -> bool:
-    secret = settings.SALEOR_WEBHOOK_SECRET
-    if not secret:
-        return False
-    signature = request.headers.get("Saleor-Signature", "")
-    expected = hmac.new(secret.encode(), request.body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(signature, expected)
-
-
 @csrf_exempt
 @require_POST
 def saleor_webhook_view(request):
     """Receives payment-state events from Saleor.
 
-    Signature-verified (HMAC-SHA256 over the raw body with the webhook
-    secret), idempotent (re-delivery of an already-applied state is a no-op),
+    Signature-verified (Saleor detached RS256 JWS over the raw request body),
+    idempotent (re-delivery of an already-applied state is a no-op),
     and transition-guarded (invalid state jumps are refused and logged).
     """
-    if not _verify_webhook_signature(request):
+    try:
+        verify_saleor_signature(
+            request.body,
+            request.headers.get("Saleor-Signature", ""),
+        )
+    except WebhookSignatureError:
         logger.warning("Saleor webhook rejected: bad or missing signature")
         return HttpResponse(status=401)
 
     try:
         payload = json.loads(request.body)
         order_id = payload["order"]["id"]
-        event_type = payload["event_type"]
+        event_type = payload["__typename"]
     except (ValueError, KeyError, TypeError):
         logger.warning("Saleor webhook rejected: malformed payload")
         return HttpResponse(status=400)
 
     event_to_status = {
-        "order_fully_paid": Order.Status.PAID,
-        "order_payment_failed": Order.Status.FAILED,
-        "order_refunded": Order.Status.REFUNDED,
-        "order_cancelled": Order.Status.CANCELLED,
+        "OrderFullyPaid": Order.Status.PAID,
+        "OrderRefunded": Order.Status.REFUNDED,
+        "OrderFullyRefunded": Order.Status.REFUNDED,
+        "OrderCancelled": Order.Status.CANCELLED,
     }
     new_status = event_to_status.get(event_type)
     if new_status is None:
         logger.info("Saleor webhook: ignoring event %s", event_type)
         return JsonResponse({"handled": False})
 
-    order = Order.objects.filter(saleor_order_id=order_id).first()
-    if order is None:
-        # Unknown order: acknowledge so Saleor stops retrying, but log it
-        logger.warning("Saleor webhook for unknown order %s", order_id)
-        return JsonResponse({"handled": False})
+    with transaction.atomic():
+        order = Order.objects.select_for_update().filter(saleor_order_id=order_id).first()
+        if order is None:
+            # Unknown order: acknowledge so Saleor stops retrying, but log it
+            logger.warning("Saleor webhook for unknown order %s", order_id)
+            return JsonResponse({"handled": False})
 
-    if order.status == new_status:
-        return JsonResponse({"handled": True})  # idempotent re-delivery
+        if order.status == new_status:
+            return JsonResponse({"handled": True})  # idempotent re-delivery
 
-    if not order.can_transition_to(new_status):
-        logger.error(
-            "Saleor webhook refused transition %s -> %s for order %s",
-            order.status, new_status, order_id,
-        )
-        return JsonResponse({"handled": False}, status=409)
+        if not order.can_transition_to(new_status):
+            logger.error(
+                "Saleor webhook refused transition %s -> %s for order %s",
+                order.status, new_status, order_id,
+            )
+            return JsonResponse({"handled": False}, status=409)
 
-    order.status = new_status
-    order.save(update_fields=["status", "updated_at"])
+        order.status = new_status
+        order.save(update_fields=["status", "updated_at"])
     logger.info("Order %s -> %s via webhook", order_id, new_status)
     return JsonResponse({"handled": True})
 

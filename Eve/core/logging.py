@@ -36,6 +36,8 @@ _REDACTION_PATTERNS = [
     (re.compile(r"(?i)(cookie[=:]\s*)\S+.*"), r"\1[REDACTED]"),
     # Payment-shaped data (PAN-like digit runs)
     (re.compile(r"\b\d{13,19}\b"), "[REDACTED-PAN]"),
+    # Legacy upstream body-preview phrasing — bodies never belong in logs
+    (re.compile(r"(?i)(body starts with:\s*).*"), r"\1[REDACTED]"),
 ]
 
 
@@ -65,6 +67,19 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
 
+class ConsoleFormatter(logging.Formatter):
+    """Human-readable dev formatter. Exception blocks (messages and
+    tracebacks) bypass logging filters, so they are scrubbed here."""
+
+    def __init__(self):
+        super().__init__(
+            "{asctime} {levelname} {name} [{request_id}] {message}", style="{"
+        )
+
+    def formatException(self, exc_info):
+        return scrub(super().formatException(exc_info))
+
+
 class JsonFormatter(logging.Formatter):
     """One JSON object per line — machine-parseable for the log platform."""
 
@@ -80,5 +95,6 @@ class JsonFormatter(logging.Formatter):
             if key not in _STANDARD_ATTRS and not key.startswith("_"):
                 payload[key] = value
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            # Exception text bypasses filters — scrub it at format time
+            payload["exception"] = scrub(self.formatException(record.exc_info))
         return json.dumps(payload, default=str)

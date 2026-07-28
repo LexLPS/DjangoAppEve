@@ -247,6 +247,43 @@ class LogRedactionTests(TestCase):
         self.assertEqual(payload["level"], "INFO")
         self.assertIn("request_id", payload)
 
+    def _formatted_exception(self, formatter, exc_message):
+        import logging as pylogging
+        import sys
+
+        from .logging import RequestIdFilter
+        try:
+            raise RuntimeError(exc_message)
+        except RuntimeError:
+            exc_info = sys.exc_info()
+        record = pylogging.LogRecord(
+            "test", pylogging.ERROR, __file__, 1, "upstream call failed", (),
+            exc_info,
+        )
+        RequestIdFilter().filter(record)
+        return formatter.format(record)
+
+    def test_exception_tracebacks_redacted_in_json_formatter(self):
+        # Exception text bypasses logging filters; the formatter must scrub it
+        from .logging import JsonFormatter
+        output = self._formatted_exception(
+            JsonFormatter(),
+            "refused with Authorization: Bearer sk_live_xyz "
+            "Body starts with: '<html>internal secret'",
+        )
+        self.assertNotIn("sk_live_xyz", output)
+        self.assertNotIn("internal secret", output)
+        self.assertIn("[REDACTED]", output)
+
+    def test_exception_tracebacks_redacted_in_console_formatter(self):
+        from .logging import ConsoleFormatter
+        output = self._formatted_exception(
+            ConsoleFormatter(),
+            "sessionid=abc123def Body starts with: '<html>internal secret'",
+        )
+        self.assertNotIn("abc123def", output)
+        self.assertNotIn("internal secret", output)
+
 
 class RetentionTests(TestCase):
     def test_purge_expired_data_deletes_only_expired_records(self):

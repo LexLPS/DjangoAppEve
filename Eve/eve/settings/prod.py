@@ -67,12 +67,10 @@ CACHES = {
     }
 }
 
-# Checkout may only be enabled with verified webhooks configured
-if CHECKOUT_ENABLED and not config("SALEOR_WEBHOOK_SECRET", default=""):
-    raise ImproperlyConfigured(
-        "CHECKOUT_ENABLED requires SALEOR_WEBHOOK_SECRET so payment webhooks "
-        "can be signature-verified."
-    )
+# An explicit override, when supplied, must remain HTTPS. Otherwise the JWKS
+# endpoint is safely derived from the already HTTPS-only GraphQL origin.
+if SALEOR_JWKS_URL and not SALEOR_JWKS_URL.startswith("https://"):
+    raise ImproperlyConfigured("SALEOR_JWKS_URL must be an https:// URL in production.")
 
 # Admin MFA is on by default in production
 ADMIN_REQUIRE_MFA = config("DJANGO_ADMIN_REQUIRE_MFA", default=True, cast=bool)

@@ -88,8 +88,9 @@ suspicion of exposure. Order matters:
 2. `DB_PASSWORD`, `MONGODB_URI` credentials, Redis auth — create the new
    credential, deploy, rolling restart, then revoke the old one (zero
    downtime; old credential stays valid during the roll).
-3. `SALEOR_API_TOKEN` and `SALEOR_WEBHOOK_SECRET` — rotate in Saleor first,
-   deploy the new values, verify one webhook round-trip.
+3. `SALEOR_API_TOKEN` — rotate in Saleor first, deploy the new value, then
+   verify one API request. Saleor rotates webhook signing keys through its
+   JWKS; Eve refreshes the cached keys automatically.
 4. `EMAIL_HOST_PASSWORD`, `SENTRY_DSN` — rotate at the provider, deploy.
 
 After any rotation: confirm `/healthz/ready/`, one login, one webhook, and
@@ -124,13 +125,32 @@ all of the following, in order:
 
 1. Configure `SALEOR_GRAPHQL_URL`, `SALEOR_API_TOKEN`, and channel against
    the production Saleor instance.
-2. Create a Saleor webhook for order events (fully paid, payment failed,
-   refunded, cancelled) pointing at `/payments/webhooks/saleor/` with a
-   strong `secretKey`; set the same value as `SALEOR_WEBHOOK_SECRET`.
+2. Create a Saleor webhook for order events (fully paid, fully refunded,
+   refunded, cancelled) pointing at `/payments/webhooks/saleor/`. Leave the
+   deprecated `secretKey` unset so Saleor sends a detached RS256 JWS. Eve
+   derives `/.well-known/jwks.json` from `SALEOR_GRAPHQL_URL`; set
+   `SALEOR_JWKS_URL` only when an explicit override is required.
+   Use a subscription payload that includes the signed GraphQL type name:
+
+   ```graphql
+   subscription {
+     event {
+       __typename
+       ... on OrderFullyPaid { order { id } }
+       ... on OrderRefunded { order { id } }
+       ... on OrderFullyRefunded { order { id } }
+       ... on OrderCancelled { order { id } }
+     }
+   }
+   ```
+
+   Subscribe to `ORDER_FULLY_PAID`, `ORDER_REFUNDED`,
+   `ORDER_FULLY_REFUNDED`, and `ORDER_CANCELLED`. Eve intentionally derives
+   the transition from the signed `__typename` body field rather than an
+   unsigned request header.
 3. Run the integration suite against that instance and require green:
    `SALEOR_INTEGRATION=1 python manage.py test payments`
-4. Set `CHECKOUT_ENABLED=True` (production refuses this without the webhook
-   secret) and verify one real end-to-end order, its webhook state change to
+4. Set `CHECKOUT_ENABLED=True` and verify one real end-to-end order, its webhook state change to
    `paid`, and a refund round-trip before announcing availability.
 
 ## Admin protection

@@ -53,11 +53,15 @@ if not SALEOR_GRAPHQL_URL.startswith("https://"):
 REDIS_URL = config("REDIS_URL")
 if not REDIS_URL.startswith(("redis://", "rediss://")):
     raise ImproperlyConfigured("REDIS_URL must be a redis:// or rediss:// URL.")
+from core.cache import SafeJSONSerializer  # noqa: E402
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL,
         "OPTIONS": {
+            # JSON instead of pickle (threat model R2)
+            "serializer": SafeJSONSerializer(),
             "max_connections": config("REDIS_MAX_CONNECTIONS", default=50, cast=int),
             "socket_connect_timeout": 2,
             "socket_timeout": 2,

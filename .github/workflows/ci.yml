@@ -45,6 +45,7 @@ jobs:
       MONGODB_DB_NAME: ci
       SALEOR_GRAPHQL_URL: https://saleor.example.com/graphql/
       REDIS_URL: rediss://redis.example.net:6380
+      DJANGO_TRUSTED_PROXIES: 100.64.0.0/10
       EMAIL_HOST: smtp.example.net
       DEFAULT_FROM_EMAIL: noreply@example.com
     steps:

@@ -142,6 +142,26 @@ class AccountLockoutTests(TestCase):
         self.assertEqual(response.status_code, 429)
         self.assertNotIn("_auth_user_id", self.client.session)
 
+    def test_lockout_notifies_account_owner_once(self):
+        for i in range(10):
+            self._fail_from(f"198.51.100.{i}")
+        lockout_mails = [m for m in mail.outbox if "locked" in m.subject]
+        self.assertEqual(len(lockout_mails), 1)
+        self.assertIn("alice@example.com", lockout_mails[0].to)
+        # Further failures inside the same window don't spam the owner
+        self._fail_from("198.51.100.200")
+        self.assertEqual(
+            len([m for m in mail.outbox if "locked" in m.subject]), 1)
+
+    def test_lockout_of_unknown_username_sends_nothing(self):
+        for i in range(10):
+            self.client.post(
+                reverse("login"),
+                {"username": "ghost-user", "password": "wrong"},
+                REMOTE_ADDR=f"198.51.100.{i}",
+            )
+        self.assertEqual(len(mail.outbox), 0)
+
     def test_successful_login_clears_failure_count(self):
         for i in range(5):
             self._fail_from(f"198.51.100.{i}")

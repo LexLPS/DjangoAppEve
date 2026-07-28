@@ -39,13 +39,38 @@ def _is_locked(username: str) -> bool:
         return False
 
 
-def _record_failure(username: str):
+def _record_failure(username: str) -> int:
     key = _lockout_key(username)
     try:
-        if not cache.add(key, 1, timeout=LOCKOUT_WINDOW_SECONDS):
-            cache.incr(key)
+        if cache.add(key, 1, timeout=LOCKOUT_WINDOW_SECONDS):
+            return 1
+        return cache.incr(key)
     except Exception:
         logger.exception("Lockout cache unavailable; failure not recorded")
+        return 0
+
+
+def _notify_lockout(username: str):
+    """Tell the real account owner their account was just locked (threat
+    model R5: deliberate lockouts should not go unnoticed). Silent when the
+    username doesn't exist — no enumeration signal."""
+    user = User.objects.filter(username=username).first()
+    if not user or not user.email:
+        return
+    try:
+        send_mail(
+            "Your Eve account was temporarily locked",
+            f"Hi {user.username},\n\n"
+            "There were repeated failed sign-in attempts on your account, so "
+            "sign-in has been paused for about 15 minutes as a precaution.\n\n"
+            "If this was you, simply wait and try again. If it was not you, "
+            "we recommend resetting your password once sign-in is available "
+            "again. Your password has not been changed.",
+            None,  # DEFAULT_FROM_EMAIL
+            [user.email],
+        )
+    except Exception:
+        logger.exception("Could not send lockout notification")
 
 
 def _clear_failures(username: str):
@@ -112,7 +137,10 @@ def login_view(request):
             login(request, form.get_user())
             return redirect("product_catalogue")
         if username:
-            _record_failure(username)
+            failures = _record_failure(username)
+            if failures == LOCKOUT_THRESHOLD:  # notify exactly once per window
+                logger.warning("Account lockout triggered")
+                _notify_lockout(username)
     else:
         form = AuthenticationForm()
     return render(request, "accounts/login.html", {"form": form})

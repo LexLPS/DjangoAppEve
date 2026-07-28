@@ -128,7 +128,28 @@ runtime. Residual: base image not digest-pinned, no container scan (R8).
 | R9 | Email verification is recorded but nothing requires it. | Low | Gate checkout (when enabled) and contact-visible features on `email_verified`. |
 | R10 | Registration allows multiple accounts per email address. | Low | Enforce case-insensitive unique email at the form + a DB constraint; mind the enumeration tradeoff (return a neutral error). |
 
-## 7. Explicitly accepted risks
+## 7. Mitigation status
+
+Implemented on this branch after the initial assessment:
+
+- **R1** — `manage.py check --deploy` now warns (`eve.W001`) when
+  `DJANGO_TRUSTED_PROXIES` is unset; CI gates on warnings, so a deploy
+  without proxy configuration fails loudly. Middleware already supports
+  CIDR + `X-Real-IP` (Railway: `100.64.0.0/10`).
+- **R2** — the Redis cache now uses `SafeJSONSerializer` (JSON, ints raw
+  for INCR) instead of pickle: a compromised Redis can corrupt state but
+  not execute code.
+- **R3** — unknown product slugs are negatively cached for 5 minutes;
+  repeated probing no longer costs one Saleor call per request.
+- **R4** — `manage.py reconcile_orders [--fix]` compares recent Saleor
+  orders with the local table, reports divergence, and can recreate
+  missing records for matched users. Run daily; alert on mismatches.
+- **R5** — crossing the lockout threshold emails the account owner once
+  per window (silent for nonexistent usernames — no enumeration signal).
+
+Still open: R6–R10 (see register above).
+
+## 8. Explicitly accepted risks
 
 - Saleor is trusted for product content and payment state (commercial
   dependency); its data is nonetheless validated/sanitized on ingress.

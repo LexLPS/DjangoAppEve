@@ -139,11 +139,16 @@ ABANDONED_CART_RETENTION_DAYS = config("ABANDONED_CART_RETENTION_DAYS", default=
 REDIS_URL = config("REDIS_URL", default="")
 
 if REDIS_URL:
+    from core.cache import SafeJSONSerializer
+
     CACHES = {
         "default": {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
             "LOCATION": REDIS_URL,
             "OPTIONS": {
+                # JSON instead of pickle: a compromised Redis must not be
+                # able to execute code in the app (threat model R2)
+                "serializer": SafeJSONSerializer(),
                 # Passed through to redis.ConnectionPool
                 "max_connections": config("REDIS_MAX_CONNECTIONS", default=50, cast=int),
                 "socket_connect_timeout": 2,

@@ -1,6 +1,7 @@
 import logging
 import time
 import uuid
+from ipaddress import ip_address, ip_network
 
 from django.conf import settings
 from django.db import connection
@@ -90,10 +91,9 @@ class RequestMetricsMiddleware:
 class TrustedProxyMiddleware:
     """Resolve the real client IP behind trusted reverse proxies.
 
-    When the direct peer (REMOTE_ADDR) is one of TRUSTED_PROXIES, walk
-    X-Forwarded-For from the right, skip trusted hops, and use the first
-    untrusted address as REMOTE_ADDR. Client-supplied XFF prefixes are
-    thereby ignored — only the hop appended by our own proxy counts.
+    TRUSTED_PROXIES accepts individual addresses and CIDR networks. When
+    the direct peer is trusted, prefer a valid X-Real-IP (used by Railway),
+    then fall back to a validated X-Forwarded-For chain for other proxies.
     With TRUSTED_PROXIES empty (the default) nothing is rewritten.
     Must run before anything that reads REMOTE_ADDR (rate limiting,
     admin allowlist).
@@ -102,16 +102,45 @@ class TrustedProxyMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
 
+    @staticmethod
+    def _parse_ip(value):
+        try:
+            return ip_address(value.strip())
+        except (AttributeError, ValueError):
+            return None
+
+    @classmethod
+    def _is_trusted(cls, value, trusted_proxies):
+        address = cls._parse_ip(value)
+        if address is None:
+            return False
+        for entry in trusted_proxies:
+            try:
+                if address in ip_network(entry.strip(), strict=False):
+                    return True
+            except (AttributeError, ValueError):
+                continue
+        return False
+
     def __call__(self, request):
-        trusted = set(settings.TRUSTED_PROXIES)
+        trusted = settings.TRUSTED_PROXIES
         peer = request.META.get("REMOTE_ADDR", "")
+        if not trusted or not self._is_trusted(peer, trusted):
+            return self.get_response(request)
+
+        real_ip = self._parse_ip(request.META.get("HTTP_X_REAL_IP", ""))
+        if real_ip is not None:
+            request.META["REMOTE_ADDR"] = str(real_ip)
+            return self.get_response(request)
+
         forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
-        if trusted and peer in trusted and forwarded:
-            hops = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
-            for ip in reversed(hops):
-                if ip not in trusted:
-                    request.META["REMOTE_ADDR"] = ip
-                    break
+        if forwarded:
+            hops = [self._parse_ip(value) for value in forwarded.split(",")]
+            if all(hop is not None for hop in hops):
+                for hop in reversed(hops):
+                    if not self._is_trusted(str(hop), trusted):
+                        request.META["REMOTE_ADDR"] = str(hop)
+                        break
         return self.get_response(request)
 
 

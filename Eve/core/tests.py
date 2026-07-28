@@ -97,6 +97,37 @@ class TrustedProxyMiddlewareTests(TestCase):
         # rightmost untrusted hop — appended by our own proxy — counts
         self.assertEqual(self.middleware(request).content, b"203.0.113.5")
 
+    @override_settings(TRUSTED_PROXIES=["100.64.0.0/10"])
+    def test_railway_real_ip_taken_from_trusted_proxy_cidr(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="100.64.0.4",
+            HTTP_X_REAL_IP="203.0.113.5",
+            HTTP_X_FORWARDED_FOR="6.6.6.6",
+        )
+        self.assertEqual(self.middleware(request).content, b"203.0.113.5")
+
+    @override_settings(TRUSTED_PROXIES=["100.64.0.0/10"])
+    def test_real_ip_ignored_from_untrusted_peer(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="198.51.100.9", HTTP_X_REAL_IP="203.0.113.5"
+        )
+        self.assertEqual(self.middleware(request).content, b"198.51.100.9")
+
+    @override_settings(TRUSTED_PROXIES=["100.64.0.0/10"])
+    def test_malformed_real_ip_does_not_replace_peer(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="100.64.0.4", HTTP_X_REAL_IP="not-an-ip"
+        )
+        self.assertEqual(self.middleware(request).content, b"100.64.0.4")
+
+    @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
+    def test_malformed_forwarded_chain_is_rejected(self):
+        request = self.factory.get(
+            "/", REMOTE_ADDR="10.0.0.1",
+            HTTP_X_FORWARDED_FOR="203.0.113.5, not-an-ip",
+        )
+        self.assertEqual(self.middleware(request).content, b"10.0.0.1")
+
     @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
     def test_forwarded_header_ignored_from_untrusted_peer(self):
         request = self.factory.get(

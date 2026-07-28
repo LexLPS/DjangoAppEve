@@ -49,11 +49,13 @@ admin IP allowlist all key on `REMOTE_ADDR`.
    client-supplied value it forwards untouched) `X-Forwarded-Proto`, and
    append the peer address to `X-Forwarded-For`
    (`deploy/nginx.conf` does both).
-2. Set `DJANGO_TRUSTED_PROXIES` to the proxy addresses. The
-   `TrustedProxyMiddleware` then resolves the real client IP by walking
-   `X-Forwarded-For` from the right and skipping trusted hops — spoofed
-   prefixes sent by clients are ignored. Unset (default), forwarded headers
-   are ignored entirely.
+2. Set `DJANGO_TRUSTED_PROXIES` to the proxy addresses or CIDR networks.
+   The middleware accepts `X-Real-IP` only from those peers, then falls back
+   to a validated `X-Forwarded-For` chain. Unset (default), forwarded headers
+   are ignored entirely. On Railway, use `100.64.0.0/10`: deployment access
+   logs show Railway's rotating edge peers in that private CGNAT range, and
+   Railway documents `X-Real-IP` as the client address. Re-check the observed
+   peer range if Railway changes its networking architecture.
 3. `SECURE_PROXY_SSL_HEADER` (prod) trusts `X-Forwarded-Proto: https` — safe
    only because of rule 1. Never enable it with a proxy that passes the
    header through from clients.

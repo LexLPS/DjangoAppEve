@@ -6,7 +6,10 @@ services:
     build: .
     env_file: .env
     environment:
-      DJANGO_ENV: prod
+      # Local Compose terminates plain HTTP at nginx and uses non-TLS
+      # container networks. Production/staging fail-closed settings require
+      # real TLS backends and therefore belong in the deployment platform.
+      DJANGO_ENV: dev
       DB_HOST: postgres
       MONGODB_URI: "mongodb://mongo:27017"
       REDIS_URL: "redis://redis:6379/0"

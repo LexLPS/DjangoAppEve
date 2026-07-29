@@ -37,6 +37,7 @@ jobs:
       DJANGO_ENV: prod
       DJANGO_SECRET_KEY: ci-dummy-9f3k2m8x7q1w5e4r6t0y3u9i2o5p8a1s4d7f0g3h6j9k2l5z8x1
       DJANGO_ALLOWED_HOSTS: ci.example.com
+      DJANGO_CSRF_TRUSTED_ORIGINS: https://ci.example.com
       DB_NAME: ci
       DB_USER: ci
       DB_PASSWORD: ci-dummy-password
@@ -50,6 +51,8 @@ jobs:
       EMAIL_HOST: smtp.example.net
       DEFAULT_FROM_EMAIL: noreply@example.com
       PUBLIC_BASE_URL: https://ci.example.com
+      DEPLOYMENT_ENVIRONMENT: production
+      RELEASE_SHA: 0123456789abcdef0123456789abcdef01234567
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -82,6 +85,7 @@ jobs:
       - run: pip install ruff bandit
       - run: ruff check Eve
       - run: bandit -r Eve -c Eve/bandit.yaml -ll
+      - run: python Eve/deploy/check_lock.py Eve/requirements.lock
 
   secret-scan:
     name: Secret scanning (gitleaks)

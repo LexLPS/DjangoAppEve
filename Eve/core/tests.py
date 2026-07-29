@@ -687,4 +687,52 @@ class CacheLeaseTests(TestCase):
         with patch("core.cache_lock.cache.add", side_effect=ConnectionError):
             with self.assertRaises(CacheLeaseUnavailable):
                 with cache_lease("test-lease", timeout=10):
-                    pass
+                        pass
+
+
+class DeploymentResilienceTests(TestCase):
+    def test_dependency_lock_is_fully_pinned(self):
+        from pathlib import Path
+
+        from deploy.check_lock import validate
+
+        lock = Path(__file__).resolve().parent.parent / "requirements.lock"
+        self.assertEqual(validate(lock), [])
+
+    def test_post_deploy_gate_requires_three_consecutive_healthy_rounds(self):
+        from deploy.verify_deployment import verify
+
+        replies = [
+            (200, {"status": "alive"}),
+            (200, {"status": "ready", "checks": {"postgresql": "ok"}}),
+        ] * 3
+        with patch("deploy.verify_deployment._get_json", side_effect=replies) as get:
+            self.assertTrue(verify("https://eve.example.com", attempts=3, interval=0))
+        self.assertEqual(get.call_count, 6)
+
+    def test_post_deploy_gate_rejects_credentials_or_plain_http(self):
+        from deploy.verify_deployment import verify
+
+        for url in ("http://eve.example.com", "https://user:pass@eve.example.com"):
+            with self.assertRaises(ValueError):
+                verify(url, attempts=1, interval=0)
+
+    def test_web_release_runs_checks_recovery_migrations_and_indexes_in_order(self):
+        from core.management.commands.release_preflight import Command
+
+        with (
+            patch.dict("os.environ", {"DJANGO_ENV": "prod"}),
+            patch("core.management.commands.release_preflight.call_command") as call,
+        ):
+            Command(stdout=None, stderr=None).handle(migrate=True, schema_only=False)
+        self.assertEqual(
+            [args.args[0] for args in call.call_args_list],
+            ["check", "audit_data_protection", "migrate", "ensure_indexes", "migrate"],
+        )
+
+    def test_worker_release_checks_schema_without_applying_it(self):
+        from core.management.commands.release_preflight import Command
+
+        with patch("core.management.commands.release_preflight.call_command") as call:
+            Command(stdout=None, stderr=None).handle(migrate=False, schema_only=True)
+        self.assertEqual([args.args[0] for args in call.call_args_list], ["check", "migrate"])

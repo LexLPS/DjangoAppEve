@@ -1,0 +1,29 @@
+name: Post-deployment verification
+
+on: deployment_status
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: post-deploy-${{ github.event.deployment.environment }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.deployment.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Require an immutable deployment revision
+        run: test "${#DEPLOYED_SHA}" -eq 40
+        env:
+          DEPLOYED_SHA: ${{ github.event.deployment.sha }}
+      - name: Verify three consecutive healthy probe rounds
+        run: python Eve/deploy/verify_deployment.py --base-url "$DEPLOYMENT_URL"
+        env:
+          DEPLOYMENT_URL: ${{ github.event.deployment_status.environment_url }}

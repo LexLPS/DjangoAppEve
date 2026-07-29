@@ -191,8 +191,6 @@ class CheckoutFlowTests(TestCase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_unknown_completion_is_journaled_and_not_retried(self):
-        self.client.get(reverse("checkout"))
-        key = self.client.session["checkout_idempotency_key"]
         with (
             patch("payments.views.get_cart", return_value=self.cart),
             patch(
@@ -204,6 +202,8 @@ class CheckoutFlowTests(TestCase):
                 side_effect=CheckoutError("Checkout could not be completed."),
             ) as complete_mock,
         ):
+            self.client.get(reverse("checkout"))
+            key = self.client.session["checkout_idempotency_key"]
             first = self.client.post(reverse("checkout"))
             second = self.client.post(reverse("checkout"))
 
@@ -219,8 +219,6 @@ class CheckoutFlowTests(TestCase):
         self.assertEqual(Order.objects.count(), 0)
 
     def test_checkout_create_failure_can_be_retried_safely(self):
-        self.client.get(reverse("checkout"))
-        key = self.client.session["checkout_idempotency_key"]
         with (
             patch("payments.views.get_cart", return_value=self.cart),
             patch(
@@ -240,6 +238,8 @@ class CheckoutFlowTests(TestCase):
             ),
             patch("payments.views.clear_cart"),
         ):
+            self.client.get(reverse("checkout"))
+            key = self.client.session["checkout_idempotency_key"]
             self.client.post(reverse("checkout"))
             response = self.client.post(reverse("checkout"))
 

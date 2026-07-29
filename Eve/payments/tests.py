@@ -361,6 +361,12 @@ class WebhookTests(TestCase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.REFUNDED)
 
+    def test_cancellation_flow(self):
+        response = self._post({"__typename": "OrderCancelled", "order": {"id": "ORD1"}})
+        self.assertEqual(response.status_code, 202)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.CANCELLED)
+
     def test_unknown_order_acknowledged_without_changes(self):
         response = self._post({"__typename": "OrderFullyPaid", "order": {"id": "GHOST"}})
         self.assertEqual(response.status_code, 202)
@@ -833,3 +839,74 @@ class SaleorIntegrationTests(TestCase):
         checkout = create_checkout("integration@example.com", items)
         self.assertTrue(checkout["checkout_id"])
         self.assertGreater(checkout["total_amount"], 0)
+
+
+class ProductionAcceptanceCommandTests(TestCase):
+    def setUp(self):
+        from io import StringIO
+
+        self.output = StringIO()
+        self.user = User.objects.create_user("acceptance", "acceptance@example.com")
+        self.order = Order.objects.create(
+            user=self.user,
+            saleor_order_id="ORD-ACCEPT",
+            saleor_checkout_id="CHK-ACCEPT",
+            idempotency_key="acceptance-key",
+            total_amount="1.00",
+            currency="EUR",
+            status=Order.Status.PAID,
+        )
+        CheckoutAttempt.objects.create(
+            user=self.user,
+            idempotency_key="acceptance-key",
+            cart_fingerprint="a" * 64,
+            state=CheckoutAttempt.State.COMPLETED,
+            saleor_checkout_id="CHK-ACCEPT",
+            saleor_order_id="ORD-ACCEPT",
+        )
+        WebhookEvent.objects.create(
+            fingerprint="d" * 64,
+            event_type="OrderFullyPaid",
+            saleor_order_id="ORD-ACCEPT",
+            payload={"__typename": "OrderFullyPaid", "order": {"id": "ORD-ACCEPT"}},
+            status=WebhookEvent.Status.PROCESSED,
+        )
+
+    def test_acceptance_gate_passes_with_local_saleor_and_webhook_evidence(self):
+        from django.core.management import call_command
+
+        saleor = {"order": {"id": "ORD-ACCEPT", "status": "FULFILLED", "paymentStatus": "FULLY_CHARGED"}}
+        with patch(
+            "payments.management.commands.verify_production_acceptance.saleor_graphql",
+            return_value=saleor,
+        ):
+            call_command(
+                "verify_production_acceptance",
+                "ORD-ACCEPT",
+                "--expect",
+                "paid",
+                "--json",
+                stdout=self.output,
+            )
+        result = json.loads(self.output.getvalue())
+        self.assertTrue(result["passed"])
+
+    def test_acceptance_gate_fails_when_signed_event_evidence_is_missing(self):
+        from django.core.management import CommandError, call_command
+
+        WebhookEvent.objects.all().delete()
+        saleor = {"order": {"id": "ORD-ACCEPT", "status": "FULFILLED", "paymentStatus": "FULLY_CHARGED"}}
+        with (
+            patch(
+                "payments.management.commands.verify_production_acceptance.saleor_graphql",
+                return_value=saleor,
+            ),
+            self.assertRaises(CommandError),
+        ):
+            call_command(
+                "verify_production_acceptance",
+                "ORD-ACCEPT",
+                "--expect",
+                "paid",
+                stderr=self.output,
+            )

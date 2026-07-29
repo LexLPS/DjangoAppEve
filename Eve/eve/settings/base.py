@@ -16,6 +16,15 @@ from decouple import Csv, config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+DJANGO_ENV_NAME = config("DJANGO_ENV", default="prod")
+DEPLOYMENT_ENVIRONMENT = config(
+    "DEPLOYMENT_ENVIRONMENT",
+    default=config("RAILWAY_ENVIRONMENT_NAME", default=""),
+)
+RELEASE_SHA = config(
+    "RELEASE_SHA",
+    default=config("RAILWAY_GIT_COMMIT_SHA", default=""),
+)
 
 
 # Quick-start development settings - unsuitable for production

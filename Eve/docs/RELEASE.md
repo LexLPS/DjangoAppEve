@@ -37,6 +37,10 @@ Vault) at runtime — and are injected as environment variables. Rules:
 
 ## Rollouts and rollback
 
+The Railway-specific controlled sequence, config paths, health verifier,
+failure exercises, and rollback procedure are in
+`docs/DEPLOYMENT_RESILIENCE.md`.
+
 - **Rolling or blue-green only.** New pods must return 200 from
   `/healthz/ready/` before receiving traffic; old pods drain afterwards.
   Never stop-the-world.
@@ -70,3 +74,5 @@ Vault) at runtime — and are injected as environment variables. Rules:
    review for the payment flow.
 3. Sign-off recorded (who, when, what was verified) before
    `CHECKOUT_ENABLED=True` reaches production.
+
+Use `docs/PRODUCTION_ACCEPTANCE.md` as the evidence-bearing final checklist.

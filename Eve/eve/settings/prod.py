@@ -5,6 +5,21 @@ from .base import *
 
 DEBUG = False
 
+EXPECTED_DEPLOYMENT_ENVIRONMENT = (
+    "production" if DJANGO_ENV_NAME == "prod" else DJANGO_ENV_NAME
+)
+if DEPLOYMENT_ENVIRONMENT != EXPECTED_DEPLOYMENT_ENVIRONMENT:
+    raise ImproperlyConfigured(
+        "DEPLOYMENT_ENVIRONMENT must match the Railway environment "
+        f"{EXPECTED_DEPLOYMENT_ENVIRONMENT!r} for DJANGO_ENV={DJANGO_ENV_NAME!r}."
+    )
+if len(RELEASE_SHA) != 40 or any(
+    character not in "0123456789abcdef" for character in RELEASE_SHA.lower()
+):
+    raise ImproperlyConfigured(
+        "RELEASE_SHA (or RAILWAY_GIT_COMMIT_SHA) must be a full 40-character Git SHA."
+    )
+
 # No default here: production must fail loudly if the secret key is missing
 SECRET_KEY = config("DJANGO_SECRET_KEY")
 if SECRET_KEY in SECRET_KEY_FALLBACKS:
@@ -101,6 +116,10 @@ DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
 PUBLIC_BASE_URL = config("PUBLIC_BASE_URL")
 if not PUBLIC_BASE_URL.startswith("https://"):
     raise ImproperlyConfigured("PUBLIC_BASE_URL must be an https:// URL in production.")
+if not ALLOWED_HOSTS or not CSRF_TRUSTED_ORIGINS:
+    raise ImproperlyConfigured("Allowed hosts and trusted CSRF origins are required.")
+if CHECKOUT_ENABLED and not SALEOR_API_TOKEN:
+    raise ImproperlyConfigured("SALEOR_API_TOKEN is required when checkout is enabled.")
 
 # TLS terminates at the reverse proxy; trust its X-Forwarded-Proto so
 # request.is_secure() is correct. Only safe because the proxy overwrites

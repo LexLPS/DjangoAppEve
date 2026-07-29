@@ -1,6 +1,6 @@
 # Reproducible application image. Dependencies come from requirements.lock
 # (full pinned closure) so every build installs identical versions.
-FROM python:3.13-slim
+FROM python:3.13.14-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.lock ./
-RUN pip install -r requirements.lock
+RUN pip install --no-deps -r requirements.lock
 
 COPY . .
 

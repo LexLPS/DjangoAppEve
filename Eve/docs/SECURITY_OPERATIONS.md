@@ -29,6 +29,11 @@ this document covers what must be done around it.
 
 ## Backups
 
+The detailed machine-verifiable procedure and signing-key overlap rotation
+are in `docs/DATA_PROTECTION.md`. Run `python manage.py audit_data_protection`
+as a production release gate; it validates backup/restore evidence without
+printing secret values or connection details.
+
 Two databases hold state; both need backups.
 
 - **PostgreSQL** (users, profiles, orders, contact messages — the system of

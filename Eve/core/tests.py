@@ -531,6 +531,123 @@ class LoadTestConfigurationTests(TestCase):
 
         self.assertEqual(DEFAULT_MANIFEST_PATH, "loadtest/manifest.json")
 
+    def test_offline_gate_accepts_complete_healthy_evidence(self):
+        import csv
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from loadtest.config import P95_BUDGETS_MS
+        from loadtest.evaluate import evaluate_resources, evaluate_stats
+
+        with tempfile.TemporaryDirectory() as directory:
+            stats_path = Path(directory) / "run_stats.csv"
+            with stats_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["Name", "Request Count", "Failure Count", "95%"],
+                )
+                writer.writeheader()
+                for name, budget in P95_BUDGETS_MS.items():
+                    writer.writerow(
+                        {"Name": name, "Request Count": 25, "Failure Count": 0, "95%": budget}
+                    )
+            resources_path = Path(directory) / "resources.jsonl"
+            resources_path.write_text(
+                json.dumps(
+                    {
+                        "event": "resource_snapshot",
+                        "pg_total": 4,
+                        "pg_max": 20,
+                        "redis_in_use": 3,
+                        "redis_max": 50,
+                        "mongo_current": 2,
+                        "mongo_max_pool": 50,
+                        "checkout_uncertain": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(evaluate_stats(stats_path)[0], [])
+            self.assertEqual(evaluate_resources(resources_path)[0], [])
+
+    def test_offline_gate_rejects_missing_flow_and_resource_exhaustion(self):
+        import csv
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from loadtest.evaluate import evaluate_resources, evaluate_stats
+
+        with tempfile.TemporaryDirectory() as directory:
+            stats_path = Path(directory) / "run_stats.csv"
+            with stats_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=["Name", "Request Count", "Failure Count", "95%"],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {"Name": "GET /", "Request Count": 5, "Failure Count": 1, "95%": 900}
+                )
+            resources_path = Path(directory) / "resources.jsonl"
+            resources_path.write_text(
+                json.dumps(
+                    {"event": "resource_snapshot", "pg_total": 9, "pg_max": 10}
+                ),
+                encoding="utf-8",
+            )
+            stats_failures, _ = evaluate_stats(stats_path)
+            resource_failures, _ = evaluate_resources(resources_path)
+        self.assertTrue(any("required flow missing" in failure for failure in stats_failures))
+        self.assertTrue(any("utilization" in failure for failure in resource_failures))
+
+
+class DataProtectionAuditTests(TestCase):
+    def test_current_automated_evidence_passes_without_printing_timestamps(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.utils import timezone
+
+        marker = timezone.now().isoformat()
+        output = StringIO()
+        with override_settings(
+            POSTGRES_BACKUP_LAST_SUCCESS_AT=marker,
+            MONGODB_BACKUP_LAST_SUCCESS_AT=marker,
+            RESTORE_TEST_LAST_SUCCESS_AT=marker,
+            BACKUP_ENCRYPTION_CONFIRMED=True,
+            BACKUP_OFFSITE_CONFIRMED=True,
+        ):
+            call_command("audit_data_protection", stdout=output)
+        self.assertIn("audit passed", output.getvalue())
+        self.assertNotIn(marker, output.getvalue())
+
+    def test_missing_or_stale_evidence_fails_closed(self):
+        from datetime import timedelta
+        from io import StringIO
+
+        from django.core.management import CommandError, call_command
+        from django.utils import timezone
+
+        stale = (timezone.now() - timedelta(days=200)).isoformat()
+        with override_settings(
+            POSTGRES_BACKUP_LAST_SUCCESS_AT="",
+            MONGODB_BACKUP_LAST_SUCCESS_AT=stale,
+            RESTORE_TEST_LAST_SUCCESS_AT=stale,
+            BACKUP_ENCRYPTION_CONFIRMED=False,
+            BACKUP_OFFSITE_CONFIRMED=False,
+        ):
+            with self.assertRaises(CommandError):
+                call_command("audit_data_protection", stderr=StringIO())
+
+    def test_cache_broker_isolation_deploy_check(self):
+        from core.checks import cache_and_broker_are_isolated
+
+        with override_settings(REDIS_URL="rediss://cache", CELERY_BROKER_URL="rediss://cache"):
+            warnings = cache_and_broker_are_isolated(None)
+        self.assertEqual(warnings[0].id, "eve.W003")
+
 
 class CelerySecurityConfigurationTests(TestCase):
     def test_only_json_task_messages_are_accepted(self):

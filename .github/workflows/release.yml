@@ -66,7 +66,8 @@ jobs:
           echo "   (backward-compatible only - expand/contract pattern)"
           echo "2. Ensure Mongo indexes:    manage.py ensure_indexes"
           echo "3. Retention pass check:    manage.py purge_expired_data"
-          echo "4. Rolling deploy of eve:${{ github.sha }} gated on /healthz/ready/"
-          echo "5. Verify /healthz/ready/ returns 200 on new pods before shifting traffic"
+          echo "4. Recovery evidence gate: manage.py audit_data_protection"
+          echo "5. Rolling deploy of eve:${{ github.sha }} gated on /healthz/ready/"
+          echo "6. Verify /healthz/ready/ returns 200 on new pods before shifting traffic"
         # Replace with your platform's commands; secrets like DATABASE
         # credentials come from the GitHub Environment, not from files.

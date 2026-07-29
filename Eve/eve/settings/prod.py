@@ -7,6 +7,10 @@ DEBUG = False
 
 # No default here: production must fail loudly if the secret key is missing
 SECRET_KEY = config("DJANGO_SECRET_KEY")
+if SECRET_KEY in SECRET_KEY_FALLBACKS:
+    raise ImproperlyConfigured("DJANGO_SECRET_KEY_FALLBACKS must not contain the active key.")
+if any(len(key) < 50 for key in SECRET_KEY_FALLBACKS):
+    raise ImproperlyConfigured("Every fallback signing key must be at least 50 characters.")
 
 # Comma-separated, e.g. DJANGO_ALLOWED_HOSTS=eve.example.com,www.eve.example.com
 ALLOWED_HOSTS = config("DJANGO_ALLOWED_HOSTS", cast=Csv())

@@ -43,3 +43,35 @@ def trusted_proxies_configured(app_configs, **kwargs):
             )
         ]
     return []
+
+
+@register(Tags.security, deploy=True)
+def cache_and_broker_are_isolated(app_configs, **kwargs):
+    """The durable Celery broker must not inherit cache eviction behavior."""
+    cache_url = getattr(settings, "REDIS_URL", "")
+    broker_url = getattr(settings, "CELERY_BROKER_URL", "")
+    if cache_url and cache_url == broker_url:
+        return [
+            Warning(
+                "REDIS_URL and CELERY_BROKER_URL point to the same service. "
+                "Cache eviction can then discard queued payment work.",
+                hint="Use a separate persistent no-eviction Redis broker.",
+                id="eve.W003",
+            )
+        ]
+    return []
+
+
+@register(Tags.security, deploy=True)
+def signing_key_fallbacks_are_safe(app_configs, **kwargs):
+    active = getattr(settings, "SECRET_KEY", "")
+    fallbacks = getattr(settings, "SECRET_KEY_FALLBACKS", [])
+    if active and active in fallbacks:
+        return [
+            Warning(
+                "The active Django signing key is duplicated in SECRET_KEY_FALLBACKS.",
+                hint="Keep only retired keys in DJANGO_SECRET_KEY_FALLBACKS.",
+                id="eve.W004",
+            )
+        ]
+    return []

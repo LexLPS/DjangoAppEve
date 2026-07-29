@@ -71,7 +71,8 @@ Target a subset with tags: `--tags browse`, `cache`, `cart`, `checkout`,
 - No resource exhaustion. Run the sampler alongside the test:
 
   ```bash
-  python manage.py sample_resources --interval 10 --duration 600
+  python manage.py sample_resources --interval 10 --duration 600 --json \
+    > loadtest/results/resources.jsonl
   ```
 
   Watch `pg_total` vs `pg_max`, `redis_in_use` vs `redis_max`,
@@ -79,6 +80,20 @@ Target a subset with tags: `--tags browse`, `cache`, `cart`, `checkout`,
   and `queue_ms` in the `http_request` events (rising queue time with flat
   `duration_ms` = worker saturation). See docs/OBSERVABILITY.md.
 - Webhook stage returns 202 only — a 401 means the seeded key expired.
+
+After Locust exits, run the offline evidence gate. It proves every required
+flow received enough traffic and rejects exhausted backend pools or uncertain
+checkout state:
+
+```bash
+python -m loadtest.evaluate \
+  --stats loadtest/results/run-YYYYMMDD_stats.csv \
+  --resources loadtest/results/resources.jsonl
+```
+
+The command prints a machine-readable JSON decision and exits non-zero on a
+failed gate. Archive the Locust CSV files, resource JSONL, evaluator output,
+application version, worker/pod counts, and Railway service sizes together.
 
 ## 5. Clean up
 

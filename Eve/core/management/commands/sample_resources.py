@@ -5,11 +5,12 @@ cron in production for a continuous capacity signal:
 
     python manage.py sample_resources --interval 10 --duration 600
 """
+import json
 import time
 
 from django.core.management.base import BaseCommand
 
-from core.monitoring import log_resource_snapshot
+from core.monitoring import log_resource_snapshot, snapshot_resources
 
 
 class Command(BaseCommand):
@@ -20,14 +21,22 @@ class Command(BaseCommand):
                             help="Seconds between samples (0 = single sample)")
         parser.add_argument("--duration", type=int, default=0,
                             help="Stop after this many seconds (0 = run forever)")
+        parser.add_argument(
+            "--json", action="store_true",
+            help="Write clean JSONL evidence to stdout for loadtest.evaluate",
+        )
 
     def handle(self, *args, **options):
         interval = options["interval"]
         deadline = time.monotonic() + options["duration"] if options["duration"] else None
 
         while True:
-            stats = log_resource_snapshot()
-            self.stdout.write(str(stats))
+            if options["json"]:
+                stats = snapshot_resources()
+                self.stdout.write(json.dumps({"event": "resource_snapshot", **stats}))
+            else:
+                stats = log_resource_snapshot()
+                self.stdout.write(str(stats))
             if not interval:
                 return
             if deadline and time.monotonic() + interval > deadline:

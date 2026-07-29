@@ -1,6 +1,7 @@
 import logging
 from urllib.parse import urlparse
 
+from core.cache_lock import CacheLeaseUnavailable, cache_lease, wait_for_value
 from django.contrib.auth.decorators import login_required
 from django.core.cache import cache
 from django.http import Http404, HttpResponseBadRequest
@@ -8,7 +9,13 @@ from django.shortcuts import redirect, render
 from django.views.decorators.http import require_POST
 
 from .services.cart_service import add_to_cart, get_cart, remove_from_cart
-from .services.mongo_client import cache_product, get_cached_product, get_cached_products
+from .services.mongo_client import (
+    cache_product,
+    get_cached_product,
+    get_cached_products,
+    get_stale_cached_product,
+    get_stale_cached_products,
+)
 from .services.saleor_client import (
     SaleorAPIError,
     fetch_product_by_slug,
@@ -18,14 +25,38 @@ from .services.saleor_client import (
 logger = logging.getLogger(__name__)
 
 MAX_CART_QUANTITY = 20
+CACHE_REFRESH_LEASE_SECONDS = 15
+CACHE_REFRESH_WAIT_SECONDS = 1.5
+
+
+def _stale_products(limit=50):
+    try:
+        return get_stale_cached_products(limit=limit)
+    except Exception:
+        logger.exception("Stale product catalogue cache unavailable")
+        return []
+
+
+def _stale_product(slug):
+    try:
+        return get_stale_cached_product(slug)
+    except Exception:
+        logger.exception("Stale product cache unavailable (slug=%s)", slug)
+        return None
+
+
+def _cache_product_safely(product):
+    try:
+        cache_product(product)
+    except Exception:
+        logger.exception("Product cache write unavailable (slug=%s)", product.get("slug"))
 
 
 def _is_valid_product(product) -> bool:
     """External data (Saleor / Mongo) is untrusted: require the fields the
     templates and cart depend on before rendering or caching anything."""
     return isinstance(product, dict) and all(
-        isinstance(product.get(key), str) and product[key]
-        for key in ("id", "name", "slug")
+        isinstance(product.get(key), str) and product[key] for key in ("id", "name", "slug")
     )
 
 
@@ -80,15 +111,33 @@ def product_catalogue_view(request):
     #  If no fresh cache, try Saleor
     if not products:
         try:
-            fetched = fetch_products_from_saleor(first=20)
-            products = [_sanitize_product(p) for p in fetched if _is_valid_product(p)]
-            logger.info("Saleor returned %d products (%d valid)", len(fetched), len(products))
-
-            for product in products:
-                cache_product(product)
-        except SaleorAPIError:
+            with cache_lease("catalogue:refresh", timeout=CACHE_REFRESH_LEASE_SECONDS) as owner:
+                if owner:
+                    fetched = fetch_products_from_saleor(first=20)
+                    products = [_sanitize_product(p) for p in fetched if _is_valid_product(p)]
+                    logger.info(
+                        "Saleor returned %d products (%d valid)",
+                        len(fetched),
+                        len(products),
+                    )
+                    for product in products:
+                        _cache_product_safely(product)
+                else:
+                    refreshed = wait_for_value(
+                        lambda: get_cached_products(limit=50) or None,
+                        timeout=CACHE_REFRESH_WAIT_SECONDS,
+                    )
+                    products = [
+                        _sanitize_product(p)
+                        for p in (refreshed or _stale_products(limit=50))
+                        if _is_valid_product(p)
+                    ]
+        except (SaleorAPIError, CacheLeaseUnavailable):
             catalogue_unavailable = True
-            logger.exception("Saleor catalogue fetch failed")
+            logger.exception("Saleor catalogue refresh unavailable")
+            products = [
+                _sanitize_product(p) for p in _stale_products(limit=50) if _is_valid_product(p)
+            ]
 
     #  If still nothing AND there was an error, use fallback mock data
     if not products and catalogue_unavailable:
@@ -150,11 +199,22 @@ def _get_product_or_404(slug: str) -> dict:
     if cached and _is_valid_product(cached):
         return _sanitize_product(cached)
 
+    fetched_from_saleor = False
     try:
-        product = fetch_product_by_slug(slug)
-    except SaleorAPIError:
-        logger.exception("Saleor product fetch failed (slug=%s)", slug)
-        raise Http404("Product not available at the moment") from None
+        with cache_lease(f"product:refresh:{slug}", timeout=CACHE_REFRESH_LEASE_SECONDS) as owner:
+            if owner:
+                product = fetch_product_by_slug(slug)
+                fetched_from_saleor = True
+            else:
+                product = wait_for_value(
+                    lambda: get_cached_product(slug),
+                    timeout=CACHE_REFRESH_WAIT_SECONDS,
+                ) or _stale_product(slug)
+    except (SaleorAPIError, CacheLeaseUnavailable):
+        logger.exception("Saleor product refresh unavailable (slug=%s)", slug)
+        product = _stale_product(slug)
+        if not _is_valid_product(product):
+            raise Http404("Product not available at the moment") from None
 
     if not _is_valid_product(product):
         try:
@@ -164,7 +224,8 @@ def _get_product_or_404(slug: str) -> dict:
         raise Http404("Product not found")
 
     product = _sanitize_product(product)
-    cache_product(product)
+    if fetched_from_saleor:
+        _cache_product_safely(product)
     return product
 
 

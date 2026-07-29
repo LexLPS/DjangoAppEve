@@ -36,12 +36,17 @@ def cache_product(product: dict):
 
 
 def get_cached_products(limit: int = 50) -> list:
-    return list(
-        products_collection.find({"cached_at": {"$gte": _freshness_cutoff()}}).limit(limit)
-    )
+    return list(products_collection.find({"cached_at": {"$gte": _freshness_cutoff()}}).limit(limit))
+
+
+def get_stale_cached_products(limit: int = 50) -> list:
+    """Return the newest entries regardless of TTL for degraded reads."""
+    return list(products_collection.find({}).sort("cached_at", -1).limit(limit))
 
 
 def get_cached_product(slug: str):
-    return products_collection.find_one(
-        {"slug": slug, "cached_at": {"$gte": _freshness_cutoff()}}
-    )
+    return products_collection.find_one({"slug": slug, "cached_at": {"$gte": _freshness_cutoff()}})
+
+
+def get_stale_cached_product(slug: str):
+    return products_collection.find_one({"slug": slug})

@@ -5,6 +5,7 @@ import json
 from urllib.parse import urlparse
 
 import requests
+from core.cache_lock import CacheLeaseUnavailable, cache_lease, wait_for_value
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
@@ -42,27 +43,49 @@ def _load_jwks(*, force_refresh: bool = False) -> dict:
         raise WebhookSignatureError("Saleor JWKS URL must use HTTPS")
 
     cache_key = f"saleor:jwks:{url}"
-    if not force_refresh:
+    try:
         cached = cache.get(cache_key)
-        if isinstance(cached, dict):
-            return cached
+    except Exception as exc:
+        raise WebhookSignatureError("signing-key cache unavailable") from exc
+    if not force_refresh and isinstance(cached, dict):
+        return cached
 
     try:
-        response = requests.get(url, timeout=(2, 5), allow_redirects=False)
-        response.raise_for_status()
-        jwks = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise WebhookSignatureError("unable to retrieve Saleor signing keys") from exc
+        with cache_lease(f"{cache_key}:refresh", timeout=10) as owner:
+            if owner:
+                try:
+                    response = requests.get(url, timeout=(2, 5), allow_redirects=False)
+                    response.raise_for_status()
+                    jwks = response.json()
+                except (requests.RequestException, ValueError) as exc:
+                    raise WebhookSignatureError("unable to retrieve Saleor signing keys") from exc
+                if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
+                    raise WebhookSignatureError("invalid Saleor JWKS document")
+                cache.set(cache_key, jwks, timeout=settings.SALEOR_JWKS_CACHE_SECONDS)
+                return jwks
 
-    if not isinstance(jwks, dict) or not isinstance(jwks.get("keys"), list):
-        raise WebhookSignatureError("invalid Saleor JWKS document")
-    cache.set(cache_key, jwks, timeout=settings.SALEOR_JWKS_CACHE_SECONDS)
-    return jwks
+            # On a forced refresh, do not accept the old document while a
+            # different process is rotating it.
+            jwks = wait_for_value(
+                lambda: (
+                    value
+                    if isinstance((value := cache.get(cache_key)), dict)
+                    and (not force_refresh or value != cached)
+                    else None
+                ),
+                timeout=2,
+            )
+            if isinstance(jwks, dict):
+                return jwks
+    except CacheLeaseUnavailable as exc:
+        raise WebhookSignatureError("unable to coordinate signing-key refresh") from exc
+    raise WebhookSignatureError("timed out retrieving Saleor signing keys")
 
 
 def _public_key(jwks: dict, kid: str):
     matches = [
-        key for key in jwks["keys"]
+        key
+        for key in jwks["keys"]
         if key.get("kid") == kid
         and key.get("kty") == "RSA"
         and key.get("alg", "RS256") == "RS256"

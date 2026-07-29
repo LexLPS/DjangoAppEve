@@ -19,9 +19,7 @@ class CsrfProtectionTests(TestCase):
         self.csrf_client = Client(enforce_csrf_checks=True)
 
     def test_login_post_without_token_rejected(self):
-        response = self.csrf_client.post(
-            reverse("login"), {"username": "x", "password": "y"}
-        )
+        response = self.csrf_client.post(reverse("login"), {"username": "x", "password": "y"})
         self.assertEqual(response.status_code, 403)
 
     def test_register_post_without_token_rejected(self):
@@ -29,9 +27,15 @@ class CsrfProtectionTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_contact_post_without_token_rejected(self):
-        response = self.csrf_client.post(reverse("contact"), {
-            "name": "a", "email": "a@example.com", "subject": "s", "message": "m",
-        })
+        response = self.csrf_client.post(
+            reverse("contact"),
+            {
+                "name": "a",
+                "email": "a@example.com",
+                "subject": "s",
+                "message": "m",
+            },
+        )
         self.assertEqual(response.status_code, 403)
         self.assertEqual(ContactMessage.objects.count(), 0)
 
@@ -90,7 +94,8 @@ class TrustedProxyMiddlewareTests(TestCase):
     @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
     def test_client_ip_taken_from_forwarded_header_behind_trusted_proxy(self):
         request = self.factory.get(
-            "/", REMOTE_ADDR="10.0.0.1",
+            "/",
+            REMOTE_ADDR="10.0.0.1",
             HTTP_X_FORWARDED_FOR="6.6.6.6, 203.0.113.5",
         )
         # The spoofable client-supplied prefix (6.6.6.6) is ignored; only the
@@ -100,7 +105,8 @@ class TrustedProxyMiddlewareTests(TestCase):
     @override_settings(TRUSTED_PROXIES=["100.64.0.0/10"])
     def test_railway_real_ip_taken_from_trusted_proxy_cidr(self):
         request = self.factory.get(
-            "/", REMOTE_ADDR="100.64.0.4",
+            "/",
+            REMOTE_ADDR="100.64.0.4",
             HTTP_X_REAL_IP="203.0.113.5",
             HTTP_X_FORWARDED_FOR="6.6.6.6",
         )
@@ -108,22 +114,19 @@ class TrustedProxyMiddlewareTests(TestCase):
 
     @override_settings(TRUSTED_PROXIES=["100.64.0.0/10"])
     def test_real_ip_ignored_from_untrusted_peer(self):
-        request = self.factory.get(
-            "/", REMOTE_ADDR="198.51.100.9", HTTP_X_REAL_IP="203.0.113.5"
-        )
+        request = self.factory.get("/", REMOTE_ADDR="198.51.100.9", HTTP_X_REAL_IP="203.0.113.5")
         self.assertEqual(self.middleware(request).content, b"198.51.100.9")
 
     @override_settings(TRUSTED_PROXIES=["100.64.0.0/10"])
     def test_malformed_real_ip_does_not_replace_peer(self):
-        request = self.factory.get(
-            "/", REMOTE_ADDR="100.64.0.4", HTTP_X_REAL_IP="not-an-ip"
-        )
+        request = self.factory.get("/", REMOTE_ADDR="100.64.0.4", HTTP_X_REAL_IP="not-an-ip")
         self.assertEqual(self.middleware(request).content, b"100.64.0.4")
 
     @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
     def test_malformed_forwarded_chain_is_rejected(self):
         request = self.factory.get(
-            "/", REMOTE_ADDR="10.0.0.1",
+            "/",
+            REMOTE_ADDR="10.0.0.1",
             HTTP_X_FORWARDED_FOR="203.0.113.5, not-an-ip",
         )
         self.assertEqual(self.middleware(request).content, b"10.0.0.1")
@@ -131,14 +134,16 @@ class TrustedProxyMiddlewareTests(TestCase):
     @override_settings(TRUSTED_PROXIES=["10.0.0.1"])
     def test_forwarded_header_ignored_from_untrusted_peer(self):
         request = self.factory.get(
-            "/", REMOTE_ADDR="198.51.100.9",
+            "/",
+            REMOTE_ADDR="198.51.100.9",
             HTTP_X_FORWARDED_FOR="203.0.113.5",
         )
         self.assertEqual(self.middleware(request).content, b"198.51.100.9")
 
     def test_noop_when_no_trusted_proxies_configured(self):
         request = self.factory.get(
-            "/", REMOTE_ADDR="198.51.100.9",
+            "/",
+            REMOTE_ADDR="198.51.100.9",
             HTTP_X_FORWARDED_FOR="203.0.113.5",
         )
         self.assertEqual(self.middleware(request).content, b"198.51.100.9")
@@ -156,9 +161,7 @@ class SharedCacheRateLimitTests(TestCase):
         # login limit is 5/300s; pretend other workers already saw 5 POSTs
         for window in (int(time.time() // 300), int(time.time() // 300) + 1):
             cache.set(f"ratelimit:login:127.0.0.1:{window}", 5, timeout=300)
-        response = self.client.post(
-            reverse("login"), {"username": "x", "password": "y"}
-        )
+        response = self.client.post(reverse("login"), {"username": "x", "password": "y"})
         self.assertEqual(response.status_code, 429)
 
 
@@ -167,12 +170,12 @@ class SafeJSONSerializerTests(TestCase):
 
     def setUp(self):
         from .cache import SafeJSONSerializer
+
         self.serializer = SafeJSONSerializer()
 
     def test_round_trips_json_shapes(self):
         for value in ({"a": [1, 2]}, "text", True, None, 3.5, ["x"]):
-            self.assertEqual(
-                self.serializer.loads(self.serializer.dumps(value)), value)
+            self.assertEqual(self.serializer.loads(self.serializer.dumps(value)), value)
 
     def test_integers_pass_through_raw_for_incr(self):
         self.assertEqual(self.serializer.dumps(7), 7)  # not bytes: INCR-able
@@ -185,6 +188,7 @@ class SafeJSONSerializerTests(TestCase):
 
     def test_never_deserializes_pickle(self):
         import pickle
+
         # Pickle bytes are rejected as malformed JSON, never executed
         with self.assertRaises(ValueError):
             self.serializer.loads(pickle.dumps({"evil": True}))
@@ -196,6 +200,7 @@ class TrustedProxyDeployCheckTests(TestCase):
 
     def test_warns_when_unset(self):
         from .checks import trusted_proxies_configured
+
         with override_settings(TRUSTED_PROXIES=[]):
             warnings = trusted_proxies_configured(None)
         self.assertEqual(len(warnings), 1)
@@ -203,6 +208,7 @@ class TrustedProxyDeployCheckTests(TestCase):
 
     def test_silent_when_configured(self):
         from .checks import trusted_proxies_configured
+
         with override_settings(TRUSTED_PROXIES=["100.64.0.0/10"]):
             self.assertEqual(trusted_proxies_configured(None), [])
 
@@ -256,9 +262,10 @@ class HealthCheckTests(TestCase):
         self.assertNotIn("secret connection detail", response.content.decode())
 
     def test_saleor_circuit_state_does_not_fail_readiness(self):
-        with patch("ecommerce.services.mongo_client.client") as mongo, \
-             patch("ecommerce.services.saleor_client._circuit_is_open",
-                   return_value=True):
+        with (
+            patch("ecommerce.services.mongo_client.client") as mongo,
+            patch("ecommerce.services.saleor_client._circuit_is_open", return_value=True),
+        ):
             mongo.admin.command.return_value = {"ok": 1}
             response = self.client.get(reverse("readiness"))
         self.assertEqual(response.status_code, 200)  # Saleor is a soft dependency
@@ -270,8 +277,7 @@ class ObservabilityTests(TestCase):
         first = self.client.get(reverse("landing"))
         second = self.client.get(reverse("landing"))
         self.assertTrue(first.headers["X-Request-ID"])
-        self.assertNotEqual(first.headers["X-Request-ID"],
-                            second.headers["X-Request-ID"])
+        self.assertNotEqual(first.headers["X-Request-ID"], second.headers["X-Request-ID"])
 
     def test_request_metrics_event_logged_with_latency_and_db_stats(self):
         with self.assertLogs("eve.requests", level="INFO") as captured:
@@ -295,10 +301,10 @@ class QueueTimeTests(TestCase):
 
     def test_queue_time_reported_when_proxy_sets_header(self):
         import time as pytime
+
         start = pytime.time() - 0.25  # request accepted 250ms ago
         with self.assertLogs("eve.requests", level="INFO") as captured:
-            self.client.get(reverse("landing"),
-                            HTTP_X_REQUEST_START=f"t={start:.3f}")
+            self.client.get(reverse("landing"), HTTP_X_REQUEST_START=f"t={start:.3f}")
         record = captured.records[0]
         self.assertGreater(record.queue_ms, 100)
 
@@ -309,8 +315,12 @@ class QueueTimeTests(TestCase):
 
     def test_malformed_or_skewed_values_are_ignored(self):
         import time as pytime
-        for header in ("garbage", "t=not-a-number",
-                       f"t={pytime.time() + 60:.3f}"):  # clock skew: future
+
+        for header in (
+            "garbage",
+            "t=not-a-number",
+            f"t={pytime.time() + 60:.3f}",
+        ):  # clock skew: future
             with self.assertLogs("eve.requests", level="INFO") as captured:
                 self.client.get(reverse("landing"), HTTP_X_REQUEST_START=header)
             self.assertFalse(hasattr(captured.records[0], "queue_ms"), header)
@@ -324,6 +334,7 @@ class ResourceSnapshotTests(TestCase):
         # Backends absent under the test settings (SQLite, LocMem) must be
         # reported as errors rather than breaking the sampler
         from .monitoring import snapshot_resources
+
         stats = snapshot_resources()
         for prefix in ("pg", "redis", "mongo"):
             reported = [key for key in stats if key.startswith(f"{prefix}_")]
@@ -331,6 +342,7 @@ class ResourceSnapshotTests(TestCase):
 
     def test_snapshot_is_logged_as_a_structured_event(self):
         from .monitoring import log_resource_snapshot
+
         with self.assertLogs("eve.resources", level="INFO") as captured:
             log_resource_snapshot()
         self.assertEqual(captured.records[0].event, "resource_snapshot")
@@ -341,6 +353,7 @@ class MongoPoolListenerTests(TestCase):
         from unittest.mock import Mock
 
         from .monitoring import MongoPoolLogger
+
         listener = MongoPoolLogger()
         with self.assertLogs("eve.resources", level="WARNING") as captured:
             listener.connection_checked_out(Mock(duration=0.4))  # 400ms wait
@@ -352,6 +365,7 @@ class MongoPoolListenerTests(TestCase):
         from unittest.mock import Mock
 
         from .monitoring import MongoPoolLogger
+
         listener = MongoPoolLogger()
         with self.assertNoLogs("eve.resources", level="WARNING"):
             listener.connection_checked_out(Mock(duration=0.001))
@@ -360,6 +374,7 @@ class MongoPoolListenerTests(TestCase):
         from unittest.mock import Mock
 
         from .monitoring import MongoPoolLogger
+
         listener = MongoPoolLogger()
         with self.assertLogs("eve.resources", level="ERROR") as captured:
             listener.connection_check_out_failed(Mock(reason="timeout"))
@@ -371,30 +386,26 @@ class LogRedactionTests(TestCase):
         import logging as pylogging
 
         from .logging import JsonFormatter, RequestIdFilter, SensitiveDataFilter
-        record = pylogging.LogRecord(
-            "test", pylogging.INFO, __file__, 1, message, (), None
-        )
+
+        record = pylogging.LogRecord("test", pylogging.INFO, __file__, 1, message, (), None)
         RequestIdFilter().filter(record)
         SensitiveDataFilter().filter(record)
         return JsonFormatter().format(record)
 
     def test_bearer_tokens_and_passwords_redacted(self):
-        output = self._formatted(
-            "retry with Authorization: Bearer sk_live_abc123 password=hunter2"
-        )
+        output = self._formatted("retry with Authorization: Bearer sk_live_abc123 password=hunter2")
         self.assertNotIn("sk_live_abc123", output)
         self.assertNotIn("hunter2", output)
         self.assertIn("[REDACTED]", output)
 
     def test_session_cookies_and_pans_redacted(self):
-        output = self._formatted(
-            "cookie: sessionid=abc123def card 4111111111111111 declined"
-        )
+        output = self._formatted("cookie: sessionid=abc123def card 4111111111111111 declined")
         self.assertNotIn("abc123def", output)
         self.assertNotIn("4111111111111111", output)
 
     def test_output_is_valid_json_with_correlation_id(self):
         import json as pyjson
+
         payload = pyjson.loads(self._formatted("plain message"))
         self.assertEqual(payload["message"], "plain message")
         self.assertEqual(payload["level"], "INFO")
@@ -405,12 +416,18 @@ class LogRedactionTests(TestCase):
         import sys
 
         from .logging import RequestIdFilter
+
         try:
             raise RuntimeError(exc_message)
         except RuntimeError:
             exc_info = sys.exc_info()
         record = pylogging.LogRecord(
-            "test", pylogging.ERROR, __file__, 1, "upstream call failed", (),
+            "test",
+            pylogging.ERROR,
+            __file__,
+            1,
+            "upstream call failed",
+            (),
             exc_info,
         )
         RequestIdFilter().filter(record)
@@ -419,6 +436,7 @@ class LogRedactionTests(TestCase):
     def test_exception_tracebacks_redacted_in_json_formatter(self):
         # Exception text bypasses logging filters; the formatter must scrub it
         from .logging import JsonFormatter
+
         output = self._formatted_exception(
             JsonFormatter(),
             "refused with Authorization: Bearer sk_live_xyz "
@@ -430,6 +448,7 @@ class LogRedactionTests(TestCase):
 
     def test_exception_tracebacks_redacted_in_console_formatter(self):
         from .logging import ConsoleFormatter
+
         output = self._formatted_exception(
             ConsoleFormatter(),
             "sessionid=abc123def Body starts with: '<html>internal secret'",
@@ -449,11 +468,14 @@ class RetentionTests(TestCase):
         from payments.models import WebhookEvent
 
         fresh = ContactMessage.objects.create(
-            name="new", email="new@example.com", subject="s", message="m")
+            name="new", email="new@example.com", subject="s", message="m"
+        )
         stale = ContactMessage.objects.create(
-            name="old", email="old@example.com", subject="s", message="m")
+            name="old", email="old@example.com", subject="s", message="m"
+        )
         ContactMessage.objects.filter(pk=stale.pk).update(
-            created_at=timezone.now() - timedelta(days=400))
+            created_at=timezone.now() - timedelta(days=400)
+        )
         old_processed = WebhookEvent.objects.create(
             fingerprint="b" * 64,
             event_type="OrderFullyPaid",
@@ -508,3 +530,26 @@ class CelerySecurityConfigurationTests(TestCase):
             "webhooks",
         )
         self.assertEqual(settings.CELERY_TASK_ROUTES["accounts.tasks.*"]["queue"], "email")
+
+
+class CacheLeaseTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_only_one_owner_and_lease_is_released(self):
+        from core.cache_lock import cache_lease
+
+        with cache_lease("test-lease", timeout=10) as first:
+            with cache_lease("test-lease", timeout=10) as second:
+                self.assertTrue(first)
+                self.assertFalse(second)
+        with cache_lease("test-lease", timeout=10) as third:
+            self.assertTrue(third)
+
+    def test_cache_failure_is_explicit(self):
+        from core.cache_lock import CacheLeaseUnavailable, cache_lease
+
+        with patch("core.cache_lock.cache.add", side_effect=ConnectionError):
+            with self.assertRaises(CacheLeaseUnavailable):
+                with cache_lease("test-lease", timeout=10):
+                    pass

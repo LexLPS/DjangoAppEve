@@ -5,9 +5,9 @@
 Maintain two **persistent, isolated** Railway environments named exactly
 `staging` and `production`. Do not share PostgreSQL, MongoDB, cache Redis,
 broker Redis, Saleor environments/channels, domains, credentials, or backup
-evidence. Set `DJANGO_ENV=prod` in both deployed environments. Railway provides
-`RAILWAY_ENVIRONMENT_NAME`, which must be `staging` or `production`; Eve maps
-`DJANGO_ENV=prod` to the expected Railway name `production` and refuses crossed
+evidence. Set `DJANGO_ENV=staging` in staging and `DJANGO_ENV=prod` in
+production. Railway provides `RAILWAY_ENVIRONMENT_NAME`; Eve maps `prod` to
+`production` and requires `staging` to match `staging`, refusing crossed
 configuration. Set `DEPLOYMENT_ENVIRONMENT` explicitly only outside Railway.
 
 Create staging by duplicating production only as a starting topology. Before

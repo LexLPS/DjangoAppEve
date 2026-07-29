@@ -32,6 +32,24 @@ CIRCUIT_FAILURE_THRESHOLD = 5
 CIRCUIT_COOLDOWN_SECONDS = 60
 _CB_FAILURES_KEY = "saleor:circuit:failures"
 _CB_OPEN_KEY = "saleor:circuit:open"
+# Outlives the cooldown so the first success afterwards can log recovery
+_CB_WAS_OPEN_KEY = "saleor:circuit:was-open"
+
+
+def _log_call(outcome: str, started: float, attempts: int, **extra):
+    """One structured event per upstream call — request rate, outcome mix,
+    and upstream latency are all derived from these (docs/OBSERVABILITY.md)."""
+    logger.info(
+        "saleor call %s in %.0fms (%d attempt(s))",
+        outcome, (time.monotonic() - started) * 1000, attempts,
+        extra={
+            "event": "saleor_call",
+            "outcome": outcome,
+            "duration_ms": round((time.monotonic() - started) * 1000, 1),
+            "attempts": attempts,
+            **extra,
+        },
+    )
 
 _session = requests.Session()
 _adapter = requests.adapters.HTTPAdapter(pool_connections=2, pool_maxsize=10)
@@ -85,10 +103,14 @@ def _circuit_record_failure():
             failures = cache.incr(_CB_FAILURES_KEY)
         if failures >= CIRCUIT_FAILURE_THRESHOLD:
             cache.set(_CB_OPEN_KEY, True, timeout=CIRCUIT_COOLDOWN_SECONDS)
+            cache.set(_CB_WAS_OPEN_KEY, True, timeout=CIRCUIT_COOLDOWN_SECONDS * 10)
             cache.delete(_CB_FAILURES_KEY)
             logger.error(
                 "Saleor circuit opened after %d consecutive failures; "
                 "failing fast for %ds", failures, CIRCUIT_COOLDOWN_SECONDS,
+                extra={"event": "saleor_circuit", "state": "open",
+                       "failures": failures,
+                       "cooldown_seconds": CIRCUIT_COOLDOWN_SECONDS},
             )
     except Exception:
         logger.exception("Circuit-breaker cache unavailable")
@@ -97,6 +119,14 @@ def _circuit_record_failure():
 def _circuit_record_success():
     try:
         cache.delete(_CB_FAILURES_KEY)
+        # Pair every "circuit opened" with a recovery event, so an alert on
+        # an open circuit can be resolved automatically
+        if cache.get(_CB_WAS_OPEN_KEY):
+            cache.delete(_CB_WAS_OPEN_KEY)
+            logger.warning(
+                "Saleor circuit closed: upstream call succeeded again",
+                extra={"event": "saleor_circuit", "state": "closed"},
+            )
     except Exception:
         pass
 
@@ -165,7 +195,10 @@ def saleor_graphql(query: str, variables: dict, retry: bool = True) -> dict:
     if not SALEOR_GRAPHQL_URL:
         raise SaleorAPIError("not_configured")
 
+    started = time.monotonic()
+
     if _circuit_is_open():
+        _log_call("circuit_open", started, 0)
         raise SaleorCircuitOpen("circuit_open")
 
     attempts = MAX_ATTEMPTS if retry else 1
@@ -193,17 +226,20 @@ def saleor_graphql(query: str, variables: dict, retry: bool = True) -> dict:
                 "Saleor connection error %s (attempt %d/%d)",
                 type(exc).__name__, attempt + 1, attempts,
             )
-        except SaleorAPIError:
+        except SaleorAPIError as exc:
             _circuit_record_failure()
+            _log_call(exc.code, started, attempt + 1, status=exc.status)
             raise
         else:
             _circuit_record_success()
+            _log_call("ok", started, attempt + 1)
             return data
 
         if attempt < attempts - 1:
             _backoff_sleep(attempt)
 
     _circuit_record_failure()
+    _log_call(last_error.code, started, attempts)
     raise last_error
 
 

@@ -5,6 +5,24 @@ from django.core.checks import Tags, Warning, register
 
 
 @register(Tags.security, deploy=True)
+def rate_limit_scale_is_production_safe(app_configs, **kwargs):
+    """A load-test scale factor must never reach production: it multiplies
+    every brute-force limit (login, registration, contact, admin)."""
+    scale = getattr(settings, "RATE_LIMIT_SCALE", 1)
+    if scale != 1:
+        return [
+            Warning(
+                f"RATE_LIMIT_SCALE is {scale}, so every per-IP rate limit is "
+                f"{scale}x its intended value. This setting exists only for "
+                "staging load tests.",
+                hint="Unset RATE_LIMIT_SCALE (or set it to 1) outside load testing.",
+                id="eve.W002",
+            )
+        ]
+    return []
+
+
+@register(Tags.security, deploy=True)
 def trusted_proxies_configured(app_configs, **kwargs):
     """Threat model R1: behind a reverse proxy with TRUSTED_PROXIES unset,
     every request carries the proxy's address, so per-IP rate limits

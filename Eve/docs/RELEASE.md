@@ -51,10 +51,14 @@ Vault) at runtime — and are injected as environment variables. Rules:
 
 ## Before accepting real users or payments (go-live gate)
 
-1. **Load test** against staging with production-shaped data: browse and
-   checkout scenarios (k6 or locust), ramp to 2× expected peak. Pass =
-   SLOs held (docs/OBSERVABILITY.md) and no resource exhaustion (DB
-   connections, Redis pool, worker saturation).
+1. **Load test** against staging: run the suite in `loadtest/` (seed →
+   run → clean up, see loadtest/README.md), ramping to 2× expected peak.
+   It covers browsing, product-detail cache hits and misses, login and
+   authenticated sessions, cart mutations, checkout, and signed webhook
+   bursts, and exits non-zero when the SLOs in docs/OBSERVABILITY.md are
+   missed. Also confirm no resource exhaustion (DB connections, Redis
+   pool, worker saturation) and archive the `--csv` artifacts with the
+   sign-off.
 2. **Final security review:** re-run the full CI security gates; verify the
    go-live checklist — checkout enablement runbook completed (integration
    tests green against production Saleor, RS256 webhook round-trip verified), admin MFA

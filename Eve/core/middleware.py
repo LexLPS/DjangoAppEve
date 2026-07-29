@@ -59,6 +59,24 @@ class RequestMetricsMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
 
+    @staticmethod
+    def _queue_ms(request):
+        """Time between the proxy accepting the request and a worker picking
+        it up — the practical worker-saturation signal (rises when all
+        workers are busy). Requires the proxy to set X-Request-Start
+        (deploy/nginx.conf); absent it, this is simply not reported."""
+        raw = request.META.get("HTTP_X_REQUEST_START", "")
+        if not raw:
+            return None
+        try:
+            # nginx sends "t=<seconds.milliseconds>"
+            started = float(raw.split("=", 1)[-1])
+        except (ValueError, IndexError):
+            return None
+        queued_ms = (time.time() - started) * 1000
+        # Clock skew between proxy and app makes negatives meaningless
+        return round(queued_ms, 1) if 0 <= queued_ms < 60_000 else None
+
     def __call__(self, request):
         if request.path.startswith(self.SKIP_PREFIXES):
             return self.get_response(request)
@@ -71,19 +89,23 @@ class RequestMetricsMiddleware:
 
         route = getattr(getattr(request, "resolver_match", None), "route", "") or request.path
         level = logging.WARNING if duration_ms > self.SLOW_REQUEST_MS else logging.INFO
+        payload = {
+            "event": "http_request",
+            "method": request.method,
+            "route": route,
+            "status": response.status_code,
+            "duration_ms": duration_ms,
+            "db_queries": stats.count,
+            "db_ms": round(stats.seconds * 1000, 1),
+        }
+        queue_ms = self._queue_ms(request)
+        if queue_ms is not None:
+            payload["queue_ms"] = queue_ms
         request_logger.log(
             level,
             "%s %s -> %d in %sms",
             request.method, route, response.status_code, duration_ms,
-            extra={
-                "event": "http_request",
-                "method": request.method,
-                "route": route,
-                "status": response.status_code,
-                "duration_ms": duration_ms,
-                "db_queries": stats.count,
-                "db_ms": round(stats.seconds * 1000, 1),
-            },
+            extra=payload,
         )
         return response
 

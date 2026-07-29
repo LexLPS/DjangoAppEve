@@ -201,6 +201,11 @@ MONGODB = {
 # (rate limiting, admin allowlist). Empty = direct connections only.
 TRUSTED_PROXIES = config("DJANGO_TRUSTED_PROXIES", default="", cast=Csv())
 
+# Multiplies every per-IP rate limit. Exists so staging load tests aren't
+# measuring 429s (loadtest/README.md). MUST stay 1 in production — a deploy
+# check (eve.W002) fails the release otherwise.
+RATE_LIMIT_SCALE = config("RATE_LIMIT_SCALE", default=1, cast=int)
+
 # --- Request size limits: bots and abuse, not legitimate form traffic
 DATA_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024   # 1 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024

@@ -1,0 +1,4 @@
+# Load-generator dependencies. Deliberately separate from the application's
+# requirements.lock — locust never ships in the app image.
+locust==2.46.2
+cryptography==49.0.0

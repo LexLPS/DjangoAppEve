@@ -2,10 +2,17 @@ import logging
 import time
 from functools import wraps
 
+from django.conf import settings
 from django.core.cache import cache
 from django.http import HttpResponse
 
 logger = logging.getLogger(__name__)
+
+
+def _effective_limit(limit: int) -> int:
+    """Apply RATE_LIMIT_SCALE (1 everywhere except load-test environments;
+    a deploy check refuses anything else in production)."""
+    return max(1, int(limit * getattr(settings, "RATE_LIMIT_SCALE", 1)))
 
 
 def _current_count(key_prefix: str, ident: str, limit: int, window_seconds: int):
@@ -39,8 +46,9 @@ def rate_limit(key_prefix: str, limit: int, window_seconds: int):
         def wrapper(request, *args, **kwargs):
             if request.method == "POST":
                 ident = request.META.get("REMOTE_ADDR", "unknown")
-                count = _current_count(key_prefix, ident, limit, window_seconds)
-                if count is not None and count > limit:
+                effective = _effective_limit(limit)
+                count = _current_count(key_prefix, ident, effective, window_seconds)
+                if count is not None and count > effective:
                     return HttpResponse(
                         "Too many attempts. Please try again later.",
                         status=429,

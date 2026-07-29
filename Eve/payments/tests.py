@@ -385,6 +385,61 @@ class EndToEndOrderJourneyTests(TestCase):
         self.assertEqual(order.status, Order.Status.REFUNDED)
 
 
+@override_settings(SALEOR_GRAPHQL_URL="https://saleor.example.com/graphql/")
+class LoadTestSignerCompatibilityTests(TestCase):
+    """The load generator must sign exactly the way the app verifies —
+    otherwise a load test silently measures 401s instead of throughput."""
+
+    def _signer_module(self):
+        import importlib.util
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "loadtest" / "signing.py"
+        spec = importlib.util.spec_from_file_location("loadtest_signing", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_generator_signatures_pass_production_verification(self):
+        from cryptography.hazmat.primitives import serialization
+
+        from .services.saleor_webhooks import verify_saleor_signature
+
+        pem = TEST_PRIVATE_KEY.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+        signer = self._signer_module().SaleorSigner(
+            {"kid": TEST_KID, "private_key_pem": pem}
+        )
+        body, signature = signer.sign(
+            {"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}}
+        )
+        with patch("payments.services.saleor_webhooks._load_jwks",
+                   return_value=TEST_JWKS):
+            verify_saleor_signature(body, signature)  # must not raise
+
+    def test_tampered_body_is_rejected(self):
+        from cryptography.hazmat.primitives import serialization
+
+        from .services.saleor_webhooks import verify_saleor_signature
+
+        pem = TEST_PRIVATE_KEY.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+        signer = self._signer_module().SaleorSigner(
+            {"kid": TEST_KID, "private_key_pem": pem}
+        )
+        _, signature = signer.sign({"__typename": "OrderFullyPaid",
+                                    "order": {"id": "ORD1"}})
+        with patch("payments.services.saleor_webhooks._load_jwks",
+                   return_value=TEST_JWKS), \
+             self.assertRaises(WebhookSignatureError):
+            verify_saleor_signature(b'{"__typename":"OrderFullyPaid"}', signature)
+
+
 class ReconcileOrdersTests(TestCase):
     """R4: orders Saleor knows about but Eve doesn't must be surfaced."""
 

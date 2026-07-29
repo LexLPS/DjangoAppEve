@@ -1,0 +1,121 @@
+"""Resource telemetry: connection pools and wait times.
+
+Two mechanisms:
+- A pymongo pool listener that reports slow connection check-outs as they
+  happen (wait-queue pressure is invisible in request latency alone).
+- `snapshot_resources()`, a point-in-time sample of PostgreSQL, Redis, and
+  MongoDB pool usage, emitted by `manage.py sample_resources` during load
+  tests and by cron in production.
+
+Everything logs structured events; nothing here needs a metrics backend.
+"""
+import logging
+
+from django.conf import settings
+from django.db import connection
+from pymongo import monitoring
+
+logger = logging.getLogger("eve.resources")
+
+# Only report check-outs that actually waited — every request checks out a
+# connection, so logging them all would drown the log
+SLOW_CHECKOUT_MS = 50
+
+
+class MongoPoolLogger(monitoring.ConnectionPoolListener):
+    """Surfaces MongoDB wait-queue pressure and pool exhaustion."""
+
+    def connection_checked_out(self, event):
+        duration_ms = getattr(event, "duration", 0) * 1000
+        if duration_ms >= SLOW_CHECKOUT_MS:
+            logger.warning(
+                "MongoDB connection wait %.0fms", duration_ms,
+                extra={"event": "mongo_pool_wait", "wait_ms": round(duration_ms, 1)},
+            )
+
+    def connection_check_out_failed(self, event):
+        # Reason is typically 'timeout' (waitQueueTimeoutMS) or 'poolClosed'
+        logger.error(
+            "MongoDB connection check-out failed: %s", event.reason,
+            extra={"event": "mongo_pool_exhausted", "reason": str(event.reason)},
+        )
+
+    # Unused hooks required by the interface
+    def pool_created(self, event): pass
+    def pool_ready(self, event): pass
+    def pool_cleared(self, event): pass
+    def pool_closed(self, event): pass
+    def connection_created(self, event): pass
+    def connection_ready(self, event): pass
+    def connection_closed(self, event): pass
+    def connection_check_out_started(self, event): pass
+    def connection_checked_in(self, event): pass
+
+
+def _postgres_stats():
+    """Connections this database has open, and the configured ceiling."""
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT count(*) FILTER (WHERE state = 'active'), count(*) "
+                "FROM pg_stat_activity WHERE datname = current_database()"
+            )
+            active, total = cursor.fetchone()
+            cursor.execute("SELECT setting::int FROM pg_settings WHERE name = 'max_connections'")
+            (max_connections,) = cursor.fetchone()
+        return {"pg_active": active, "pg_total": total, "pg_max": max_connections}
+    except Exception as exc:  # sampling must never break the caller
+        return {"pg_error": type(exc).__name__}
+
+
+def _redis_stats():
+    """In-use vs available connections in this process's pool."""
+    try:
+        from django.core.cache import cache
+        if not hasattr(cache, "_cache") or not hasattr(cache._cache, "get_client"):
+            # LocMem (dev/test): no pool to report, not an error
+            return {"redis_backend": "not-redis"}
+        client = cache._cache.get_client()
+        pool = client.connection_pool
+        in_use = len(getattr(pool, "_in_use_connections", ()))
+        available = len(getattr(pool, "_available_connections", ()))
+        return {
+            "redis_in_use": in_use,
+            "redis_available": available,
+            "redis_max": pool.max_connections,
+        }
+    except Exception as exc:
+        return {"redis_error": type(exc).__name__}
+
+
+def _mongo_stats():
+    """Server-reported connection counts (process-local pool size is not
+    exposed by pymongo)."""
+    try:
+        from ecommerce.services.mongo_client import client as mongo
+        server_status = mongo.admin.command("serverStatus")
+        connections = server_status.get("connections", {})
+        return {
+            "mongo_current": connections.get("current"),
+            "mongo_available": connections.get("available"),
+            "mongo_max_pool": settings.MONGODB.get("MAX_POOL_SIZE"),
+        }
+    except Exception as exc:
+        return {"mongo_error": type(exc).__name__}
+
+
+def snapshot_resources() -> dict:
+    stats = {}
+    stats.update(_postgres_stats())
+    stats.update(_redis_stats())
+    stats.update(_mongo_stats())
+    return stats
+
+
+def log_resource_snapshot():
+    stats = snapshot_resources()
+    logger.info(
+        "resource snapshot %s", stats,
+        extra={"event": "resource_snapshot", **stats},
+    )
+    return stats

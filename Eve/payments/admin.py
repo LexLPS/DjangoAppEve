@@ -1,7 +1,7 @@
 
 from django.contrib import admin
 
-from .models import Order, WebhookEvent
+from .models import CheckoutAttempt, Order, WebhookEvent
 
 
 @admin.register(Order)
@@ -10,6 +10,29 @@ class OrderAdmin(admin.ModelAdmin):
     list_filter = ("status", "currency")
     search_fields = ("saleor_order_id", "user__username")
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(CheckoutAttempt)
+class CheckoutAttemptAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "user",
+        "state",
+        "saleor_checkout_id",
+        "saleor_order_id",
+        "updated_at",
+    )
+    list_filter = ("state",)
+    search_fields = ("saleor_checkout_id", "saleor_order_id", "user__username")
+    readonly_fields = tuple(
+        field.name for field in CheckoutAttempt._meta.fields
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(WebhookEvent)

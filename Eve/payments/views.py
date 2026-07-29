@@ -10,12 +10,18 @@ from django.contrib.auth.decorators import login_required
 from django.db import transaction
 from django.http import HttpResponse, HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import redirect, render
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from ecommerce.services.cart_service import clear_cart, get_cart
 
-from .models import Order, WebhookEvent
-from .services.saleor_checkout import CheckoutError, complete_checkout, create_checkout
+from .models import CheckoutAttempt, Order, WebhookEvent
+from .services.saleor_checkout import (
+    CheckoutError,
+    build_lines,
+    complete_checkout,
+    create_checkout,
+)
 from .services.saleor_webhooks import WebhookSignatureError, verify_saleor_signature
 
 logger = logging.getLogger(__name__)
@@ -40,21 +46,102 @@ def _place_order_once(*, user, cart, idempotency_key):
         existing = Order.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
             return existing
-        if not cart.get("items"):
-            raise CheckoutError("Your cart is empty.")
+
+        lines = build_lines(cart.get("items") or [])
+        cart_fingerprint = hashlib.sha256(
+            json.dumps(lines, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        attempt, created = CheckoutAttempt.objects.get_or_create(
+            idempotency_key=idempotency_key,
+            defaults={"user": user, "cart_fingerprint": cart_fingerprint},
+        )
+        if not created:
+            if attempt.state == CheckoutAttempt.State.COMPLETED:
+                return Order.objects.filter(idempotency_key=idempotency_key).first()
+            if not (
+                attempt.state == CheckoutAttempt.State.FAILED
+                and not attempt.saleor_checkout_id
+            ):
+                return None
+            attempt.state = CheckoutAttempt.State.STARTED
+            attempt.last_error = ""
+            attempt.cart_fingerprint = cart_fingerprint
+            attempt.save(
+                update_fields=["state", "last_error", "cart_fingerprint", "updated_at"]
+            )
+
+        logger.info(
+            "Checkout attempt %s started",
+            attempt.pk,
+            extra={"event": "checkout_attempt", "attempt_id": attempt.pk, "state": "started"},
+        )
 
         # Saleor recalculates prices; cart amounts are not trusted.
-        checkout = create_checkout(user.email, cart["items"])
-        result = complete_checkout(checkout["checkout_id"])
-        return Order.objects.create(
-            user=user,
-            saleor_order_id=result["order_id"],
-            saleor_checkout_id=checkout["checkout_id"],
-            idempotency_key=idempotency_key,
-            total_amount=result["total_amount"],
-            currency=result["total_currency"],
-            status=Order.Status.PENDING,
+        try:
+            checkout = create_checkout(
+                user.email, cart["items"], idempotency_key=idempotency_key
+            )
+        except CheckoutError:
+            attempt.state = CheckoutAttempt.State.FAILED
+            attempt.last_error = "checkout_create_failed"
+            attempt.save(update_fields=["state", "last_error", "updated_at"])
+            raise
+
+        attempt.saleor_checkout_id = checkout["checkout_id"]
+        attempt.state = CheckoutAttempt.State.CHECKOUT_CREATED
+        attempt.save(
+            update_fields=["saleor_checkout_id", "state", "updated_at"]
         )
+        attempt.state = CheckoutAttempt.State.COMPLETING
+        attempt.save(update_fields=["state", "updated_at"])
+        try:
+            result = complete_checkout(checkout["checkout_id"])
+        except CheckoutError:
+            # The request may have reached Saleor even if Eve lost the
+            # response. Never create another checkout for this key.
+            attempt.state = CheckoutAttempt.State.UNKNOWN
+            attempt.last_error = "checkout_complete_unknown"
+            attempt.save(update_fields=["state", "last_error", "updated_at"])
+            logger.error(
+                "Checkout attempt %s outcome unknown",
+                attempt.pk,
+                extra={
+                    "event": "checkout_attempt",
+                    "attempt_id": attempt.pk,
+                    "state": "unknown",
+                },
+            )
+            raise
+
+        with transaction.atomic():
+            order = Order.objects.create(
+                user=user,
+                saleor_order_id=result["order_id"],
+                saleor_checkout_id=checkout["checkout_id"],
+                idempotency_key=idempotency_key,
+                total_amount=result["total_amount"],
+                currency=result["total_currency"],
+                status=Order.Status.PENDING,
+            )
+            attempt.saleor_order_id = result["order_id"]
+            attempt.state = CheckoutAttempt.State.COMPLETED
+            attempt.completed_at = timezone.now()
+            attempt.last_error = ""
+            attempt.save(
+                update_fields=[
+                    "saleor_order_id",
+                    "state",
+                    "completed_at",
+                    "last_error",
+                    "updated_at",
+                ]
+            )
+        logger.info(
+            "Checkout attempt %s completed",
+            attempt.pk,
+            extra={"event": "checkout_attempt", "attempt_id": attempt.pk, "state": "completed"},
+        )
+        return order
 
 
 @login_required
@@ -184,4 +271,20 @@ def saleor_webhook_view(request):
 @login_required
 def payment_history_view(request):
     orders = Order.objects.filter(user=request.user).order_by("-created_at")
-    return render(request, "payments/payment_history.html", {"orders": orders})
+    checkout_reconciliation_pending = CheckoutAttempt.objects.filter(
+        user=request.user,
+        state__in=[
+            CheckoutAttempt.State.STARTED,
+            CheckoutAttempt.State.CHECKOUT_CREATED,
+            CheckoutAttempt.State.COMPLETING,
+            CheckoutAttempt.State.UNKNOWN,
+        ],
+    ).exists()
+    return render(
+        request,
+        "payments/payment_history.html",
+        {
+            "orders": orders,
+            "checkout_reconciliation_pending": checkout_reconciliation_pending,
+        },
+    )

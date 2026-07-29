@@ -128,6 +128,9 @@ CHECKOUT_ENABLED = config("CHECKOUT_ENABLED", default=False, cast=bool)
 
 # How long Mongo-cached Saleor products stay fresh before re-fetching
 PRODUCT_CACHE_TTL_SECONDS = config("PRODUCT_CACHE_TTL_SECONDS", default=3600, cast=int)
+CHECKOUT_RECOVERY_GRACE_SECONDS = config(
+    "CHECKOUT_RECOVERY_GRACE_SECONDS", default=300, cast=int
+)
 
 # --- Data retention (enforced by manage.py purge_expired_data, run daily)
 CONTACT_MESSAGE_RETENTION_DAYS = config("CONTACT_MESSAGE_RETENTION_DAYS", default=365, cast=int)

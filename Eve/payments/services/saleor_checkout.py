@@ -17,8 +17,8 @@ class CheckoutError(RuntimeError):
 
 
 CHECKOUT_CREATE_MUTATION = """
-mutation ($channel: String!, $email: String!, $lines: [CheckoutLineInput!]!) {
-  checkoutCreate(input: {channel: $channel, email: $email, lines: $lines}) {
+mutation ($channel: String!, $email: String!, $lines: [CheckoutLineInput!]!, $metadata: [MetadataInput!]) {
+  checkoutCreate(input: {channel: $channel, email: $email, lines: $lines, metadata: $metadata}) {
     checkout {
       id
       totalPrice {
@@ -64,7 +64,7 @@ def build_lines(cart_items: list) -> list:
     return lines
 
 
-def create_checkout(email: str, cart_items: list) -> dict:
+def create_checkout(email: str, cart_items: list, *, idempotency_key: str = "") -> dict:
     """Create a Saleor checkout and return
     {"checkout_id", "total_amount", "total_currency"} with Saleor-calculated
     totals."""
@@ -76,6 +76,11 @@ def create_checkout(email: str, cart_items: list) -> dict:
             "channel": settings.SALEOR_CHANNEL,
             "email": email,
             "lines": lines,
+            "metadata": (
+                [{"key": "eve_idempotency_key", "value": idempotency_key}]
+                if idempotency_key
+                else []
+            ),
         }, retry=False)
     except SaleorAPIError:
         logger.exception("Saleor checkoutCreate failed")
@@ -111,7 +116,8 @@ def complete_checkout(checkout_id: str) -> dict:
     except SaleorAPIError:
         logger.exception("Saleor checkoutComplete failed")
         raise CheckoutError(
-            "Checkout could not be completed. You have not been charged."
+            "We could not confirm the checkout result. Do not submit it again; "
+            "we are reconciling it automatically."
         ) from None
 
     payload = data["checkoutComplete"]
@@ -120,7 +126,10 @@ def complete_checkout(checkout_id: str) -> dict:
             "Saleor checkoutComplete errors: %s",
             [(e.get("field"), e.get("code")) for e in payload["errors"]],
         )
-        raise CheckoutError("Checkout could not be completed. You have not been charged.")
+        raise CheckoutError(
+            "We could not confirm the checkout result. Do not submit it again; "
+            "we are reconciling it automatically."
+        )
 
     order = payload["order"]
     gross = order["total"]["gross"]

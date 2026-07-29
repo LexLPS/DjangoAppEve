@@ -13,7 +13,10 @@ from datetime import datetime, timezone
 
 from .mongo_client import carts_collection
 
+# Ceiling stored per line item (defence in depth against runaway writes)
 MAX_ITEM_QUANTITY = 99
+# Ceiling accepted from a single client request (HTML form and API alike)
+MAX_REQUEST_QUANTITY = 20
 
 
 def _now():
@@ -91,6 +94,20 @@ def add_to_cart(user_id: int, product: dict, quantity: int = 1):
         array_filters=[{"over.product_id": product["id"],
                         "over.quantity": {"$gt": MAX_ITEM_QUANTITY}}],
     )
+
+
+def set_item_quantity(user_id: int, product_id: str, quantity: int) -> bool:
+    """Set an existing line item's quantity outright (API clients set a
+    value rather than incrementing). Atomic; returns False when the item is
+    not in the cart."""
+    quantity = max(1, min(int(quantity), MAX_ITEM_QUANTITY))
+    result = carts_collection.update_one(
+        {"user_id": user_id, "items.product_id": product_id},
+        {
+            "$set": {"items.$.quantity": quantity, "updated_at": _now()},
+        },
+    )
+    return result.matched_count > 0
 
 
 def remove_from_cart(user_id: int, product_id: str):

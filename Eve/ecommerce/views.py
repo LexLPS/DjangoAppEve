@@ -1,92 +1,63 @@
-import logging
-from urllib.parse import urlparse
+"""Server-rendered storefront.
 
-from core.cache_lock import CacheLeaseUnavailable, cache_lease, wait_for_value
+Catalogue reads live in services/catalogue.py so the HTML views and the
+REST API (api/v1/) share one implementation; these views only translate
+domain results into templates and redirects.
+"""
+import logging
+
 from django.contrib.auth.decorators import login_required
-from django.core.cache import cache
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_POST
 
-from .services.cart_service import add_to_cart, get_cart, remove_from_cart
-from .services.mongo_client import (
-    cache_product,
-    get_cached_product,
-    get_cached_products,
-    get_stale_cached_product,
-    get_stale_cached_products,
+from .services.cart_service import (
+    MAX_REQUEST_QUANTITY,
+    add_to_cart,
+    get_cart,
+    remove_from_cart,
 )
-from .services.saleor_client import (
-    SaleorAPIError,
-    fetch_product_by_slug,
-    fetch_products_from_saleor,
+from .services.catalogue import (
+    ProductNotFound,
+    ProductUnavailable,
+    get_product,
+    list_products,
 )
 
 logger = logging.getLogger(__name__)
 
-MAX_CART_QUANTITY = 20
-CACHE_REFRESH_LEASE_SECONDS = 15
-CACHE_REFRESH_WAIT_SECONDS = 1.5
+MAX_CART_QUANTITY = MAX_REQUEST_QUANTITY
 
-
-def _stale_products(limit=50):
-    try:
-        return get_stale_cached_products(limit=limit)
-    except Exception:
-        logger.exception("Stale product catalogue cache unavailable")
-        return []
-
-
-def _stale_product(slug):
-    try:
-        return get_stale_cached_product(slug)
-    except Exception:
-        logger.exception("Stale product cache unavailable (slug=%s)", slug)
-        return None
-
-
-def _cache_product_safely(product):
-    try:
-        cache_product(product)
-    except Exception:
-        logger.exception("Product cache write unavailable (slug=%s)", product.get("slug"))
-
-
-def _is_valid_product(product) -> bool:
-    """External data (Saleor / Mongo) is untrusted: require the fields the
-    templates and cart depend on before rendering or caching anything."""
-    return isinstance(product, dict) and all(
-        isinstance(product.get(key), str) and product[key] for key in ("id", "name", "slug")
-    )
-
-
-def _safe_url(url):
-    """Only plain http(s) URLs may be stored or rendered — anything else
-    (javascript:, data:, malformed) is dropped."""
-    if not isinstance(url, str):
-        return None
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return None
-    if parsed.scheme in ("http", "https") and parsed.netloc:
-        return url
-    return None
-
-
-def _sanitize_product(product: dict) -> dict:
-    thumbnail = product.get("thumbnail")
-    safe_thumb = _safe_url(thumbnail.get("url")) if isinstance(thumbnail, dict) else None
-    product["thumbnail"] = {"url": safe_thumb} if safe_thumb else None
-
-    media = product.get("media")
-    if isinstance(media, list):
-        product["media"] = [
-            {"url": _safe_url(m.get("url"))}
-            for m in media
-            if isinstance(m, dict) and _safe_url(m.get("url"))
-        ]
-    return product
+# Shown only in the HTML storefront when the live catalogue is unreachable
+# and nothing is cached. The API never invents products: it returns 503.
+FALLBACK_PRODUCTS = [
+    {
+        "id": "1",
+        "name": "Eve Horizon – Nature Escape",
+        "slug": "eve-horizon-nature-escape",
+        "description": "Guided VR walks through forests, beaches, and mountains.",
+        "thumbnail": {"url": "https://via.placeholder.com/300x200?text=Nature"},
+        "pricing": {
+            "priceRange": {
+                "start": {"gross": {"amount": 49.99, "currency": "EUR"}},
+                "stop": {"gross": {"amount": 49.99, "currency": "EUR"}},
+            }
+        },
+    },
+    {
+        "id": "2",
+        "name": "Eve Home – Family Moments",
+        "slug": "eve-home-family-moments",
+        "description": "Recreate familiar home environments for comfort and nostalgia.",
+        "thumbnail": {"url": "https://via.placeholder.com/300x200?text=Home"},
+        "pricing": {
+            "priceRange": {
+                "start": {"gross": {"amount": 59.99, "currency": "EUR"}},
+                "stop": {"gross": {"amount": 59.99, "currency": "EUR"}},
+            }
+        },
+    },
+]
 
 
 def _parse_quantity(raw):
@@ -100,75 +71,10 @@ def _parse_quantity(raw):
 
 
 def product_catalogue_view(request):
-    products = []
-    catalogue_unavailable = False
+    products, catalogue_unavailable = list_products(limit=50)
 
-    #  Try Mongo cache first (only entries still within the TTL)
-    cached_products = get_cached_products(limit=50)
-    if cached_products:
-        products = [_sanitize_product(p) for p in cached_products if _is_valid_product(p)]
-
-    #  If no fresh cache, try Saleor
-    if not products:
-        try:
-            with cache_lease("catalogue:refresh", timeout=CACHE_REFRESH_LEASE_SECONDS) as owner:
-                if owner:
-                    fetched = fetch_products_from_saleor(first=20)
-                    products = [_sanitize_product(p) for p in fetched if _is_valid_product(p)]
-                    logger.info(
-                        "Saleor returned %d products (%d valid)",
-                        len(fetched),
-                        len(products),
-                    )
-                    for product in products:
-                        _cache_product_safely(product)
-                else:
-                    refreshed = wait_for_value(
-                        lambda: get_cached_products(limit=50) or None,
-                        timeout=CACHE_REFRESH_WAIT_SECONDS,
-                    )
-                    products = [
-                        _sanitize_product(p)
-                        for p in (refreshed or _stale_products(limit=50))
-                        if _is_valid_product(p)
-                    ]
-        except (SaleorAPIError, CacheLeaseUnavailable):
-            catalogue_unavailable = True
-            logger.exception("Saleor catalogue refresh unavailable")
-            products = [
-                _sanitize_product(p) for p in _stale_products(limit=50) if _is_valid_product(p)
-            ]
-
-    #  If still nothing AND there was an error, use fallback mock data
     if not products and catalogue_unavailable:
-        products = [
-            {
-                "id": "1",
-                "name": "Eve Horizon – Nature Escape",
-                "slug": "eve-horizon-nature-escape",
-                "description": "Guided VR walks through forests, beaches, and mountains.",
-                "thumbnail": {"url": "https://via.placeholder.com/300x200?text=Nature"},
-                "pricing": {
-                    "priceRange": {
-                        "start": {"gross": {"amount": 49.99, "currency": "EUR"}},
-                        "stop": {"gross": {"amount": 49.99, "currency": "EUR"}},
-                    }
-                },
-            },
-            {
-                "id": "2",
-                "name": "Eve Home – Family Moments",
-                "slug": "eve-home-family-moments",
-                "description": "Recreate familiar home environments for comfort and nostalgia.",
-                "thumbnail": {"url": "https://via.placeholder.com/300x200?text=Home"},
-                "pricing": {
-                    "priceRange": {
-                        "start": {"gross": {"amount": 59.99, "currency": "EUR"}},
-                        "stop": {"gross": {"amount": 59.99, "currency": "EUR"}},
-                    }
-                },
-            },
-        ]
+        products = FALLBACK_PRODUCTS
 
     context = {
         "products": products,
@@ -177,56 +83,13 @@ def product_catalogue_view(request):
     return render(request, "ecommerce/product_catalogue.html", context)
 
 
-# Negative cache for unknown slugs (threat model R3): without it every
-# GET for a random slug costs one Saleor API call — an unauthenticated
-# amplification vector against the upstream quota.
-NEGATIVE_CACHE_SECONDS = 300
-
-
 def _get_product_or_404(slug: str) -> dict:
-    """Fresh cache first, then Saleor; validates before caching/returning.
-    Slug misses are negatively cached."""
-    miss_key = f"product-miss:{slug}"
     try:
-        if cache.get(miss_key):
-            raise Http404("Product not found")
-    except Http404:
-        raise
-    except Exception:
-        logger.exception("Negative cache unavailable")
-
-    cached = get_cached_product(slug)
-    if cached and _is_valid_product(cached):
-        return _sanitize_product(cached)
-
-    fetched_from_saleor = False
-    try:
-        with cache_lease(f"product:refresh:{slug}", timeout=CACHE_REFRESH_LEASE_SECONDS) as owner:
-            if owner:
-                product = fetch_product_by_slug(slug)
-                fetched_from_saleor = True
-            else:
-                product = wait_for_value(
-                    lambda: get_cached_product(slug),
-                    timeout=CACHE_REFRESH_WAIT_SECONDS,
-                ) or _stale_product(slug)
-    except (SaleorAPIError, CacheLeaseUnavailable):
-        logger.exception("Saleor product refresh unavailable (slug=%s)", slug)
-        product = _stale_product(slug)
-        if not _is_valid_product(product):
-            raise Http404("Product not available at the moment") from None
-
-    if not _is_valid_product(product):
-        try:
-            cache.set(miss_key, True, timeout=NEGATIVE_CACHE_SECONDS)
-        except Exception:
-            logger.exception("Negative cache unavailable")
-        raise Http404("Product not found")
-
-    product = _sanitize_product(product)
-    if fetched_from_saleor:
-        _cache_product_safely(product)
-    return product
+        return get_product(slug)
+    except ProductNotFound:
+        raise Http404("Product not found") from None
+    except ProductUnavailable:
+        raise Http404("Product not available at the moment") from None
 
 
 def product_detail_view(request, slug):

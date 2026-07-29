@@ -18,9 +18,10 @@ from locust import HttpUser, between, events, tag, task
 from locust.exception import StopUser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import DEFAULT_MANIFEST_PATH  # noqa: E402 - sibling module
 from signing import SaleorSigner  # noqa: E402 — sibling module, path set above
 
-MANIFEST_PATH = os.environ.get("LOADTEST_MANIFEST", "manifest.json")
+MANIFEST_PATH = os.environ.get("LOADTEST_MANIFEST", DEFAULT_MANIFEST_PATH)
 # Checkout POSTs create real Saleor checkouts — opt in explicitly
 CHECKOUT_MODE = os.environ.get("LOADTEST_CHECKOUT", "guard")  # guard | full
 

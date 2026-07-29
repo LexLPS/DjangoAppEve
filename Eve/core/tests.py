@@ -464,3 +464,10 @@ class RetentionTests(TestCase):
         cutoff_filter = carts.delete_many.call_args.args[0]
         self.assertIn("$lt", cutoff_filter["updated_at"])
         self.assertIn("3 abandoned cart(s)", out.getvalue())
+
+
+class LoadTestConfigurationTests(TestCase):
+    def test_default_manifest_matches_documented_seed_output(self):
+        from loadtest.config import DEFAULT_MANIFEST_PATH
+
+        self.assertEqual(DEFAULT_MANIFEST_PATH, "loadtest/manifest.json")

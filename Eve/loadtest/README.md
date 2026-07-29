@@ -52,7 +52,7 @@ go-live gate.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `LOADTEST_MANIFEST` | `manifest.json` | path to the seed manifest |
+| `LOADTEST_MANIFEST` | `loadtest/manifest.json` | path to the seed manifest |
 | `LOADTEST_SLUG` | `eve-horizon-nature-escape` | a slug that exists in staging (cache-hit path) |
 | `LOADTEST_CHECKOUT` | `guard` | `guard` = never POST checkout; `full` = place real Saleor orders |
 

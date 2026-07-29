@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     
     # Third-party
     "rest_framework",
+    "rest_framework.authtoken",
     "django_otp",
     "django_otp.plugins.otp_totp",
     "django_otp.plugins.otp_static",
@@ -61,6 +62,7 @@ INSTALLED_APPS = [
     "accounts",
     "ecommerce",
     "payments",
+    "api",
 ]
 
 MIDDLEWARE = [
@@ -291,9 +293,15 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 200
 REST_FRAMEWORK = {
     # Explicit: session auth only (no basic auth), authenticated by default,
     # JSON only — the browsable API is re-enabled in dev.py
+    # Session auth for the browser (CSRF-protected), token auth for mobile
+    # and server-to-server clients. Basic auth is deliberately absent.
+    # Token first: it supplies the WWW-Authenticate header, so a bad or
+    # missing credential yields 401 (not DRF's session-auth default of 403).
     "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
+    "EXCEPTION_HANDLER": "api.errors.exception_handler",
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
@@ -309,6 +317,8 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "30/min",
         "user": "120/min",
+        # Order placement is far more expensive (and risky) than a read
+        "checkout": "10/min",
     },
 }
 

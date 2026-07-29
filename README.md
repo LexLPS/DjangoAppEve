@@ -117,6 +117,7 @@ Health endpoints:
 
 - [Installation and Saleor setup](Eve/docs/SETUP.md)
 - [Deployment architecture](Eve/docs/DEPLOYMENT.md)
+- [Implemented cybersecurity measures](Eve/docs/SECURITY_MEASURES.md)
 - [Security operations](Eve/docs/SECURITY_OPERATIONS.md)
 - [Observability and alerts](Eve/docs/OBSERVABILITY.md)
 - [Background jobs and Celery operations](Eve/docs/BACKGROUND_JOBS.md)

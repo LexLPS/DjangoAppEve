@@ -39,6 +39,8 @@ urlpatterns = [
     path("", include("core.urls")),
     path("shop/", include("ecommerce.urls")),
     path("payments/", include("payments.urls")),
+    path("api/v1/", include("api.v1.urls")),
+    # Legacy unversioned route, kept for existing clients; prefer /api/v1/
     path("api/", include(router.urls)),
     
 ]

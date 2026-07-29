@@ -111,7 +111,7 @@ class CheckoutFlowTests(TestCase):
             patch("payments.views.get_cart", return_value=self.cart),
             patch("payments.views.clear_cart"),
             patch(
-                "payments.views.create_checkout",
+                "payments.services.checkout.create_checkout",
                 return_value={
                     "checkout_id": "CHK1",
                     "total_amount": 99.98,
@@ -119,7 +119,7 @@ class CheckoutFlowTests(TestCase):
                 },
             ),
             patch(
-                "payments.views.complete_checkout",
+                "payments.services.checkout.complete_checkout",
                 return_value={"order_id": "ORD1", "total_amount": 99.98, "total_currency": "EUR"},
             ),
         ):
@@ -148,8 +148,8 @@ class CheckoutFlowTests(TestCase):
         with (
             patch("payments.views.get_cart", return_value=self.cart),
             patch("payments.views.clear_cart"),
-            patch("payments.views.create_checkout") as create_mock,
-            patch("payments.views.complete_checkout"),
+            patch("payments.services.checkout.create_checkout") as create_mock,
+            patch("payments.services.checkout.complete_checkout"),
         ):
             response = self.client.post(reverse("checkout"))
         self.assertEqual(Order.objects.count(), 1)
@@ -168,7 +168,7 @@ class CheckoutFlowTests(TestCase):
         Profile.objects.filter(user=self.user).update(email_verified=False)
         with (
             patch("payments.views.get_cart", return_value=self.cart),
-            patch("payments.views.create_checkout") as create_mock,
+            patch("payments.services.checkout.create_checkout") as create_mock,
         ):
             response = self.client.post(reverse("checkout"))
         self.assertRedirects(response, reverse("profile"), fetch_redirect_response=False)
@@ -176,11 +176,11 @@ class CheckoutFlowTests(TestCase):
         create_mock.assert_not_called()
 
     def test_held_checkout_lease_prevents_saleor_mutations(self):
-        lease = patch("payments.views.cache_lease")
+        lease = patch("payments.services.checkout.cache_lease")
         with (
             lease as mocked_lease,
             patch("payments.views.get_cart", return_value=self.cart),
-            patch("payments.views.create_checkout") as create_mock,
+            patch("payments.services.checkout.create_checkout") as create_mock,
         ):
             self.client.get(reverse("checkout"))
             mocked_lease.return_value.__enter__.return_value = False
@@ -194,11 +194,11 @@ class CheckoutFlowTests(TestCase):
         with (
             patch("payments.views.get_cart", return_value=self.cart),
             patch(
-                "payments.views.create_checkout",
+                "payments.services.checkout.create_checkout",
                 return_value={"checkout_id": "CHK-UNKNOWN"},
             ) as create_mock,
             patch(
-                "payments.views.complete_checkout",
+                "payments.services.checkout.complete_checkout",
                 side_effect=CheckoutError("Checkout could not be completed."),
             ) as complete_mock,
         ):
@@ -222,14 +222,14 @@ class CheckoutFlowTests(TestCase):
         with (
             patch("payments.views.get_cart", return_value=self.cart),
             patch(
-                "payments.views.create_checkout",
+                "payments.services.checkout.create_checkout",
                 side_effect=[
                     CheckoutError("Unavailable"),
                     {"checkout_id": "CHK-RETRY"},
                 ],
             ) as create_mock,
             patch(
-                "payments.views.complete_checkout",
+                "payments.services.checkout.complete_checkout",
                 return_value={
                     "order_id": "ORD-RETRY",
                     "total_amount": 10,
@@ -553,7 +553,7 @@ class EndToEndOrderJourneyTests(TestCase):
 
         # Add to cart (product lookup and cart storage mocked)
         with (
-            patch("ecommerce.views.get_cached_product", return_value=product),
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=product),
             patch("ecommerce.views.add_to_cart") as add_mock,
         ):
             response = self.client.post(
@@ -567,7 +567,7 @@ class EndToEndOrderJourneyTests(TestCase):
             patch("payments.views.get_cart", return_value=cart),
             patch("payments.views.clear_cart") as clear_mock,
             patch(
-                "payments.views.create_checkout",
+                "payments.services.checkout.create_checkout",
                 return_value={
                     "checkout_id": "CHK1",
                     "total_amount": 49.99,
@@ -575,7 +575,7 @@ class EndToEndOrderJourneyTests(TestCase):
                 },
             ),
             patch(
-                "payments.views.complete_checkout",
+                "payments.services.checkout.complete_checkout",
                 return_value={
                     "order_id": "ORD-E2E",
                     "total_amount": 49.99,

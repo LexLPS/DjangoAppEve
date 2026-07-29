@@ -37,7 +37,7 @@ class XssTests(TestCase):
             name='<script>alert("name")</script>Evil',
             description="<img src=x onerror=alert(1)><script>steal()</script>Hi",
         )
-        with patch("ecommerce.views.get_cached_product", return_value=evil):
+        with patch("ecommerce.services.catalogue.get_cached_product", return_value=evil):
             response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
@@ -46,7 +46,7 @@ class XssTests(TestCase):
 
     def test_catalogue_escapes_malicious_product_fields(self):
         evil = make_product(name="<script>alert(1)</script>")
-        with patch("ecommerce.views.get_cached_products", return_value=[evil]):
+        with patch("ecommerce.services.catalogue.get_cached_products", return_value=[evil]):
             response = self.client.get(reverse("product_catalogue"))
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("<script>alert", response.content.decode())
@@ -56,13 +56,13 @@ class UpstreamErrorTests(TestCase):
     def test_saleor_failure_shows_generic_message_only(self):
         error = SaleorAPIError("non_json_response", status=502, content_type="text/html")
         with (
-            patch("ecommerce.views.get_cached_products", return_value=[]),
-            patch("ecommerce.views.fetch_products_from_saleor", side_effect=error),
+            patch("ecommerce.services.catalogue.get_cached_products", return_value=[]),
+            patch("ecommerce.services.catalogue.fetch_products_from_saleor", side_effect=error),
             patch(
-                "ecommerce.views.get_stale_cached_products",
+                "ecommerce.services.catalogue.get_stale_cached_products",
                 side_effect=ConnectionError("mongo unavailable"),
             ),
-            patch("ecommerce.views.cache_product"),
+            patch("ecommerce.services.catalogue.cache_product"),
         ):
             response = self.client.get(reverse("product_catalogue"))
         self.assertEqual(response.status_code, 200)
@@ -74,9 +74,9 @@ class UpstreamErrorTests(TestCase):
     def test_invalid_external_products_are_dropped(self):
         bad = [{"id": None}, {"name": "no id or slug"}, "not-a-dict"]
         with (
-            patch("ecommerce.views.get_cached_products", return_value=[]),
-            patch("ecommerce.views.fetch_products_from_saleor", return_value=bad),
-            patch("ecommerce.views.cache_product") as cache_mock,
+            patch("ecommerce.services.catalogue.get_cached_products", return_value=[]),
+            patch("ecommerce.services.catalogue.fetch_products_from_saleor", return_value=bad),
+            patch("ecommerce.services.catalogue.cache_product") as cache_mock,
         ):
             response = self.client.get(reverse("product_catalogue"))
         self.assertEqual(response.status_code, 200)
@@ -89,11 +89,11 @@ class CacheStampedeTests(TestCase):
         lease.return_value.__enter__.return_value = False
         stale = make_product()
         with (
-            patch("ecommerce.views.get_cached_products", return_value=[]),
-            patch("ecommerce.views.cache_lease", lease),
-            patch("ecommerce.views.wait_for_value", return_value=None),
-            patch("ecommerce.views.get_stale_cached_products", return_value=[stale]),
-            patch("ecommerce.views.fetch_products_from_saleor") as fetch,
+            patch("ecommerce.services.catalogue.get_cached_products", return_value=[]),
+            patch("ecommerce.services.catalogue.cache_lease", lease),
+            patch("ecommerce.services.catalogue.wait_for_value", return_value=None),
+            patch("ecommerce.services.catalogue.get_stale_cached_products", return_value=[stale]),
+            patch("ecommerce.services.catalogue.fetch_products_from_saleor") as fetch,
         ):
             response = self.client.get(reverse("product_catalogue"))
 
@@ -105,12 +105,12 @@ class CacheStampedeTests(TestCase):
         lease = MagicMock()
         lease.return_value.__enter__.return_value = False
         with (
-            patch("ecommerce.views.get_cached_product", return_value=None),
-            patch("ecommerce.views.cache_lease", lease),
-            patch("ecommerce.views.wait_for_value", return_value=None),
-            patch("ecommerce.views.get_stale_cached_product", return_value=make_product()),
-            patch("ecommerce.views.fetch_product_by_slug") as fetch,
-            patch("ecommerce.views.cache_product") as cache_write,
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=None),
+            patch("ecommerce.services.catalogue.cache_lease", lease),
+            patch("ecommerce.services.catalogue.wait_for_value", return_value=None),
+            patch("ecommerce.services.catalogue.get_stale_cached_product", return_value=make_product()),
+            patch("ecommerce.services.catalogue.fetch_product_by_slug") as fetch,
+            patch("ecommerce.services.catalogue.cache_product") as cache_write,
         ):
             response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
 
@@ -128,8 +128,8 @@ class NegativeCacheTests(TestCase):
 
     def test_unknown_slug_hits_saleor_only_once(self):
         with (
-            patch("ecommerce.views.get_cached_product", return_value=None),
-            patch("ecommerce.views.fetch_product_by_slug", return_value=None) as fetch,
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=None),
+            patch("ecommerce.services.catalogue.fetch_product_by_slug", return_value=None) as fetch,
         ):
             first = self.client.get(reverse("product_detail", args=["ghost"]))
             second = self.client.get(reverse("product_detail", args=["ghost"]))
@@ -139,8 +139,8 @@ class NegativeCacheTests(TestCase):
 
     def test_negative_cache_does_not_block_other_slugs(self):
         with (
-            patch("ecommerce.views.get_cached_product", return_value=None),
-            patch("ecommerce.views.fetch_product_by_slug", return_value=None) as fetch,
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=None),
+            patch("ecommerce.services.catalogue.fetch_product_by_slug", return_value=None) as fetch,
         ):
             self.client.get(reverse("product_detail", args=["ghost-a"]))
             self.client.get(reverse("product_detail", args=["ghost-b"]))
@@ -148,9 +148,9 @@ class NegativeCacheTests(TestCase):
 
     def test_valid_product_not_negatively_cached(self):
         with (
-            patch("ecommerce.views.get_cached_product", return_value=None),
-            patch("ecommerce.views.fetch_product_by_slug", return_value=make_product()),
-            patch("ecommerce.views.cache_product"),
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=None),
+            patch("ecommerce.services.catalogue.fetch_product_by_slug", return_value=make_product()),
+            patch("ecommerce.services.catalogue.cache_product"),
         ):
             response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
         self.assertEqual(response.status_code, 200)
@@ -166,7 +166,7 @@ class CartInputValidationTests(TestCase):
 
     def post_quantity(self, quantity):
         with (
-            patch("ecommerce.views.get_cached_product", return_value=make_product()),
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=make_product()),
             patch("ecommerce.views.add_to_cart") as add,
         ):
             response = self.client.post(self.url, {"quantity": quantity})
@@ -190,7 +190,7 @@ class CartInputValidationTests(TestCase):
 
     def test_accepts_valid_quantity_for_current_user_only(self):
         with (
-            patch("ecommerce.views.get_cached_product", return_value=make_product()),
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=make_product()),
             patch("ecommerce.views.add_to_cart") as add,
         ):
             response = self.client.post(self.url, {"quantity": "3"})
@@ -420,7 +420,7 @@ class SaleorTelemetryTests(TestCase):
 class ExternalUrlSanitizationTests(TestCase):
     def test_javascript_thumbnail_urls_never_rendered(self):
         evil = make_product(thumbnail={"url": "javascript:alert(1)"})
-        with patch("ecommerce.views.get_cached_products", return_value=[evil]):
+        with patch("ecommerce.services.catalogue.get_cached_products", return_value=[evil]):
             response = self.client.get(reverse("product_catalogue"))
         self.assertEqual(response.status_code, 200)
         self.assertNotIn("javascript:", response.content.decode())
@@ -430,7 +430,7 @@ class ExternalUrlSanitizationTests(TestCase):
             thumbnail={"url": "data:text/html,<script>x</script>"},
             media=[{"url": "javascript:alert(1)"}, {"url": "https://cdn.example.com/ok.png"}],
         )
-        with patch("ecommerce.views.get_cached_product", return_value=evil):
+        with patch("ecommerce.services.catalogue.get_cached_product", return_value=evil):
             response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
         html = response.content.decode()
         self.assertNotIn("javascript:", html)

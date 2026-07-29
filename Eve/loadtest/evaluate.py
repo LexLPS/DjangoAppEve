@@ -78,7 +78,6 @@ def evaluate_resources(path: Path):
             for used_key, max_key in (
                 ("pg_total", "pg_max"),
                 ("redis_in_use", "redis_max"),
-                ("mongo_current", "mongo_max_pool"),
             ):
                 used, maximum = sample.get(used_key), sample.get(max_key)
                 if isinstance(used, (int, float)) and isinstance(maximum, (int, float)) and maximum:

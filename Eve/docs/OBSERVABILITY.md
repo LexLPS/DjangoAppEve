@@ -49,7 +49,8 @@ attempts remain uncertain beyond the configured recovery grace period.
 | PostgreSQL query time | `db_ms`, `db_queries` per route |
 | PostgreSQL connections | `pg_active` / `pg_total` / `pg_max` in `resource_snapshot` |
 | Redis pool usage | `redis_in_use` / `redis_available` / `redis_max` |
-| MongoDB connections | `mongo_current` / `mongo_available` / `mongo_max_pool` |
+| MongoDB database size | `mongo_data_mb` / `mongo_storage_mb` / `mongo_index_mb`, plus collection, object, and index counts |
+| MongoDB client pool cap | `mongo_max_pool`; live pressure comes from the wait-queue events below because Atlas least-privilege users cannot run cluster-wide `serverStatus` |
 | MongoDB wait-queue time | `mongo_pool_wait` events (check-outs ≥ 50 ms) and `mongo_pool_exhausted` on `waitQueueTimeoutMS` expiry |
 | Saleor request rate & latency | count and `duration_ms` of `saleor_call` events |
 | Saleor availability | `outcome` mix of `saleor_call` + `saleor_circuit` state changes + `saleor_circuit` field in `/healthz/ready/` |

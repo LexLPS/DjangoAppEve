@@ -29,7 +29,9 @@ python manage.py migrate --noinput
 ## Queues and schedules
 
 - `webhooks`: durable Saleor inbox processing and recovery every minute.
-- `orders`: Saleor reconciliation with repair every hour.
+- `orders`: Saleor reconciliation with repair every hour. Checkout attempts
+  carry an `eve_idempotency_key` Saleor metadata value so an order can be
+  reattached to the exact user and local attempt after a lost response.
 - `maintenance`: retention daily and resource sampling every minute.
 - `email`: verification and account-lockout notifications.
 - `catalogue`: Saleor-to-Mongo cache refresh every five minutes.
@@ -49,6 +51,20 @@ JSON only; pickle is disabled. Webhook processing locks both the inbox row and
 the order row, so duplicate deliveries and duplicate tasks are safe.
 Processed inbox events are retained for 90 days by default; pending events are
 never purged automatically.
+
+## Checkout recovery
+
+Before `checkoutCreate`, Eve inserts a `CheckoutAttempt` in PostgreSQL. It
+then journals the Saleor checkout ID before calling `checkoutComplete`. A
+completion error is treated as an unknown outcome rather than proof of
+failure, so the same idempotency key cannot create another Saleor checkout.
+
+The hourly `reconcile_orders --fix` job reads `eve_idempotency_key` from
+Saleor order metadata, creates a missing local `Order`, and marks its attempt
+completed in one PostgreSQL transaction. Attempts older than
+`CHECKOUT_RECOVERY_GRACE_SECONDS` (default 300) are marked unknown and emit a
+`checkout_reconciliation` alert event. An unknown attempt with no matching
+recent Saleor order requires manual review; do not delete or retry it blindly.
 
 ## Monitoring and alerts
 

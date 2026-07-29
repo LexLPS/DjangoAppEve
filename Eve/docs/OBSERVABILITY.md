@@ -36,6 +36,11 @@ circuit auto-resolves on recovery.
 `mongo_pool_wait` / `mongo_pool_exhausted` emitted live by the pymongo pool
 listener.
 
+**`checkout_attempt`** records durable checkout journal state without email,
+cart contents, totals, or idempotency tokens. Join it to the originating
+request through `request_id`. **`checkout_reconciliation`** is emitted when
+attempts remain uncertain beyond the configured recovery grace period.
+
 | Metric | Source |
 |---|---|
 | Request latency p50 / p95 / p99 | `duration_ms` percentiles per `route` |
@@ -49,6 +54,7 @@ listener.
 | Saleor request rate & latency | count and `duration_ms` of `saleor_call` events |
 | Saleor availability | `outcome` mix of `saleor_call` + `saleor_circuit` state changes + `saleor_circuit` field in `/healthz/ready/` |
 | Queue depth | `queue_<name>_depth` in `resource_snapshot`; durable payment backlog uses `webhook_pending` and `webhook_oldest_seconds` |
+| Checkout recovery backlog | `checkout_uncertain` and `checkout_oldest_uncertain_seconds` in `resource_snapshot` |
 
 Requests slower than 1 s log at WARNING (`SLOW_REQUEST_MS`).
 
@@ -105,4 +111,8 @@ Measured over 30 days, on production traffic, excluding health probes:
   ticket immediately; brute-force protection is failing open.
 - Repeated 429s from one IP or one username lockout burst — security review.
 - `Saleor webhook rejected: bad or missing signature` spike — security review.
+- **`checkout_uncertain > 0` for 10 min**, or a
+  `checkout_reconciliation` event after the hourly repair job, requires
+  immediate review. Do not ask the customer to resubmit until reconciliation
+  has completed.
 - Backup job failure or missed retention run (`purge_expired_data`) — ticket.

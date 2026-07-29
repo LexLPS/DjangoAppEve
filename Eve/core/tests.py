@@ -347,6 +347,24 @@ class ResourceSnapshotTests(TestCase):
             log_resource_snapshot()
         self.assertEqual(captured.records[0].event, "resource_snapshot")
 
+    def test_snapshot_reports_uncertain_checkout_backlog(self):
+        from django.contrib.auth.models import User
+        from payments.models import CheckoutAttempt
+
+        from .monitoring import _celery_stats
+
+        user = User.objects.create_user("checkout-metrics", "metrics@example.com")
+        CheckoutAttempt.objects.create(
+            user=user,
+            idempotency_key="metrics-attempt",
+            cart_fingerprint="a" * 64,
+            state=CheckoutAttempt.State.UNKNOWN,
+        )
+        with patch("redis.Redis.from_url", side_effect=ConnectionError):
+            stats = _celery_stats()
+        self.assertEqual(stats["checkout_uncertain"], 1)
+        self.assertGreaterEqual(stats["checkout_oldest_uncertain_seconds"], 0)
+
 
 class MongoPoolListenerTests(TestCase):
     def test_slow_checkout_is_logged_with_wait_time(self):

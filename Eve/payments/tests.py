@@ -11,7 +11,8 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from .models import Order, WebhookEvent
+from .models import CheckoutAttempt, Order, WebhookEvent
+from .services.saleor_checkout import CheckoutError
 from .services.saleor_webhooks import WebhookSignatureError
 
 TEST_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -132,6 +133,10 @@ class CheckoutFlowTests(TestCase):
         self.assertEqual(float(order.total_amount), 99.98)  # not 2 * 1.00
         self.assertEqual(order.status, Order.Status.PENDING)
         self.assertEqual(order.saleor_order_id, "ORD1")
+        attempt = CheckoutAttempt.objects.get(idempotency_key=order.idempotency_key)
+        self.assertEqual(attempt.state, CheckoutAttempt.State.COMPLETED)
+        self.assertEqual(attempt.saleor_checkout_id, "CHK1")
+        self.assertEqual(attempt.saleor_order_id, "ORD1")
 
     def test_duplicate_submit_with_same_key_creates_one_order(self):
         self._post_checkout()
@@ -184,6 +189,66 @@ class CheckoutFlowTests(TestCase):
         self.assertRedirects(response, reverse("payment_history"), fetch_redirect_response=False)
         create_mock.assert_not_called()
         self.assertEqual(Order.objects.count(), 0)
+
+    def test_unknown_completion_is_journaled_and_not_retried(self):
+        self.client.get(reverse("checkout"))
+        key = self.client.session["checkout_idempotency_key"]
+        with (
+            patch("payments.views.get_cart", return_value=self.cart),
+            patch(
+                "payments.views.create_checkout",
+                return_value={"checkout_id": "CHK-UNKNOWN"},
+            ) as create_mock,
+            patch(
+                "payments.views.complete_checkout",
+                side_effect=CheckoutError("Checkout could not be completed."),
+            ) as complete_mock,
+        ):
+            first = self.client.post(reverse("checkout"))
+            second = self.client.post(reverse("checkout"))
+
+        self.assertRedirects(first, reverse("checkout"), fetch_redirect_response=False)
+        self.assertRedirects(
+            second, reverse("payment_history"), fetch_redirect_response=False
+        )
+        attempt = CheckoutAttempt.objects.get(idempotency_key=key)
+        self.assertEqual(attempt.state, CheckoutAttempt.State.UNKNOWN)
+        self.assertEqual(attempt.saleor_checkout_id, "CHK-UNKNOWN")
+        create_mock.assert_called_once()
+        complete_mock.assert_called_once()
+        self.assertEqual(Order.objects.count(), 0)
+
+    def test_checkout_create_failure_can_be_retried_safely(self):
+        self.client.get(reverse("checkout"))
+        key = self.client.session["checkout_idempotency_key"]
+        with (
+            patch("payments.views.get_cart", return_value=self.cart),
+            patch(
+                "payments.views.create_checkout",
+                side_effect=[
+                    CheckoutError("Unavailable"),
+                    {"checkout_id": "CHK-RETRY"},
+                ],
+            ) as create_mock,
+            patch(
+                "payments.views.complete_checkout",
+                return_value={
+                    "order_id": "ORD-RETRY",
+                    "total_amount": 10,
+                    "total_currency": "EUR",
+                },
+            ),
+            patch("payments.views.clear_cart"),
+        ):
+            self.client.post(reverse("checkout"))
+            response = self.client.post(reverse("checkout"))
+
+        self.assertRedirects(
+            response, reverse("payment_history"), fetch_redirect_response=False
+        )
+        attempt = CheckoutAttempt.objects.get(idempotency_key=key)
+        self.assertEqual(attempt.state, CheckoutAttempt.State.COMPLETED)
+        self.assertEqual(create_mock.call_count, 2)
 
 
 @override_settings(SALEOR_GRAPHQL_URL="https://saleor.example.com/graphql/")
@@ -402,6 +467,21 @@ class OrderOwnershipTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "SO_ALICE_1")
         self.assertNotContains(response, "SO_BOB_1")
+
+    def test_history_warns_only_owner_about_uncertain_checkout(self):
+        CheckoutAttempt.objects.create(
+            user=self.alice,
+            idempotency_key="alice-uncertain",
+            cart_fingerprint="a" * 64,
+            state=CheckoutAttempt.State.UNKNOWN,
+        )
+        self.client.force_login(self.alice)
+        response = self.client.get(reverse("payment_history"))
+        self.assertContains(response, "still being confirmed")
+
+        self.client.force_login(self.bob)
+        response = self.client.get(reverse("payment_history"))
+        self.assertNotContains(response, "still being confirmed")
 
 
 @override_settings(
@@ -681,6 +761,42 @@ class ReconcileOrdersTests(TestCase):
         ):
             call_command("reconcile_orders", stdout=StringIO())
         self.assertFalse(Order.objects.filter(saleor_order_id="ORD-LOST").exists())
+
+    def test_fix_recovers_exact_checkout_attempt_from_saleor_metadata(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        attempt = CheckoutAttempt.objects.create(
+            user=self.user,
+            idempotency_key="attempt-token",
+            cart_fingerprint="a" * 64,
+            state=CheckoutAttempt.State.UNKNOWN,
+            saleor_checkout_id="CHK-LOST",
+        )
+        payload = self._saleor_orders(
+            [
+                {
+                    "id": "ORD-RECOVERED",
+                    "userEmail": "different@example.com",
+                    "eveIdempotencyKey": "attempt-token",
+                    "total": {"gross": {"amount": 25, "currency": "EUR"}},
+                }
+            ]
+        )
+        with patch(
+            "payments.management.commands.reconcile_orders.saleor_graphql",
+            return_value=payload,
+        ):
+            call_command("reconcile_orders", "--fix", stdout=StringIO())
+
+        order = Order.objects.get(saleor_order_id="ORD-RECOVERED")
+        self.assertEqual(order.user, self.user)
+        self.assertEqual(order.idempotency_key, "attempt-token")
+        self.assertEqual(order.saleor_checkout_id, "CHK-LOST")
+        attempt.refresh_from_db()
+        self.assertEqual(attempt.state, CheckoutAttempt.State.COMPLETED)
+        self.assertEqual(attempt.saleor_order_id, "ORD-RECOVERED")
 
 
 @skipUnless(

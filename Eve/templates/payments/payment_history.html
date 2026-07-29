@@ -5,6 +5,13 @@
 {% block content %}
     <h1>Your payment history</h1>
 
+    {% if checkout_reconciliation_pending %}
+        <p class="alert alert-warning">
+            A recent checkout is still being confirmed. Please do not submit it
+            again. This page will show the order after automatic reconciliation.
+        </p>
+    {% endif %}
+
     {% if orders %}
         <table class="data-table">
             <thead>

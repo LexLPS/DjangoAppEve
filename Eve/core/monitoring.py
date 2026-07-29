@@ -124,13 +124,30 @@ def _celery_stats():
         stats["celery_broker_error"] = type(exc).__name__
 
     try:
-        from payments.models import WebhookEvent
+        from payments.models import CheckoutAttempt, WebhookEvent
 
         pending = WebhookEvent.objects.filter(status=WebhookEvent.Status.PENDING)
         oldest = pending.order_by("received_at").values_list("received_at", flat=True).first()
         stats["webhook_pending"] = pending.count()
         stats["webhook_oldest_seconds"] = (
             round((timezone.now() - oldest).total_seconds(), 1) if oldest else 0
+        )
+        uncertain = CheckoutAttempt.objects.filter(
+            state__in=[
+                CheckoutAttempt.State.STARTED,
+                CheckoutAttempt.State.CHECKOUT_CREATED,
+                CheckoutAttempt.State.COMPLETING,
+                CheckoutAttempt.State.UNKNOWN,
+            ]
+        )
+        oldest_attempt = uncertain.order_by("created_at").values_list(
+            "created_at", flat=True
+        ).first()
+        stats["checkout_uncertain"] = uncertain.count()
+        stats["checkout_oldest_uncertain_seconds"] = (
+            round((timezone.now() - oldest_attempt).total_seconds(), 1)
+            if oldest_attempt
+            else 0
         )
     except Exception as exc:
         stats["webhook_backlog_error"] = type(exc).__name__

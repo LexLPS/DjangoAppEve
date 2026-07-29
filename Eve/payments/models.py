@@ -51,6 +51,44 @@ class Order(models.Model):
         return f"Order {self.saleor_order_id} for {self.user.username} [{self.status}]"
 
 
+class CheckoutAttempt(models.Model):
+    """Durable journal around non-idempotent Saleor checkout mutations."""
+
+    class State(models.TextChoices):
+        STARTED = "started", "Started"
+        CHECKOUT_CREATED = "checkout_created", "Checkout created"
+        COMPLETING = "completing", "Completing"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed safely"
+        UNKNOWN = "unknown", "Outcome unknown"
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="checkout_attempts"
+    )
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    cart_fingerprint = models.CharField(max_length=64)
+    state = models.CharField(
+        max_length=24, choices=State.choices, default=State.STARTED, db_index=True
+    )
+    saleor_checkout_id = models.CharField(max_length=100, blank=True, default="")
+    saleor_order_id = models.CharField(max_length=100, blank=True, default="")
+    last_error = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["state", "updated_at"],
+                name="payments_ca_state_updated_idx",
+            )
+        ]
+
+    def __str__(self):
+        return f"Checkout attempt {self.pk} [{self.state}]"
+
+
 class WebhookEvent(models.Model):
     """Durable, deduplicated inbox for signature-verified Saleor events."""
 

@@ -11,6 +11,8 @@ env/
 # Environment / secrets
 .env
 *.env
+Eve/loadtest/manifest.json
+Eve/loadtest/results/
 
 # Django
 db.sqlite3

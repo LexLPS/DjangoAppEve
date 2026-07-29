@@ -18,19 +18,48 @@
 
 ## Metrics (log-derived)
 
-`RequestMetricsMiddleware` emits one `http_request` event per request with
-`method`, `route`, `status`, `duration_ms`, `db_queries`, `db_ms`. Health
-probes and static files are excluded. Derive in the log platform:
+Three structured event families, all plain JSON log lines — no metrics
+backend required. Aggregate them in the log platform.
+
+**`http_request`** (one per request, from `RequestMetricsMiddleware`; health
+probes and static files excluded): `method`, `route`, `status`,
+`duration_ms`, `db_queries`, `db_ms`, and `queue_ms` when the proxy sets
+`X-Request-Start` (deploy/nginx.conf does).
+
+**`saleor_call`** (one per upstream call): `outcome` (`ok`, `http_error`,
+`timeout`, `connection_error`, `invalid_json`, `graphql_error`,
+`circuit_open`, …), `duration_ms`, `attempts`, `status`.
+**`saleor_circuit`**: `state` = `open` / `closed`, so an alert on an open
+circuit auto-resolves on recovery.
+
+**`resource_snapshot`** (from `manage.py sample_resources`), plus
+`mongo_pool_wait` / `mongo_pool_exhausted` emitted live by the pymongo pool
+listener.
 
 | Metric | Source |
 |---|---|
-| Request latency (p50/p95/p99) | `duration_ms` percentiles per `route` |
-| Error rate | share of events with `status >= 500` |
-| Database performance | `db_ms` and `db_queries` per route; alert on growth |
-| Saleor availability | `saleor_circuit` in `/healthz/ready/` + circuit open/close log events |
+| Request latency p50 / p95 / p99 | `duration_ms` percentiles per `route` |
+| Error rate | share of `http_request` events with `status >= 500` |
+| Worker saturation | `queue_ms` — time queued before a worker accepted the request. Rising `queue_ms` with flat `duration_ms` means every worker is busy: add workers or pods. (A true busy-worker gauge needs gunicorn's `--statsd-host` and a statsd sink.) |
+| PostgreSQL query time | `db_ms`, `db_queries` per route |
+| PostgreSQL connections | `pg_active` / `pg_total` / `pg_max` in `resource_snapshot` |
+| Redis pool usage | `redis_in_use` / `redis_available` / `redis_max` |
+| MongoDB connections | `mongo_current` / `mongo_available` / `mongo_max_pool` |
+| MongoDB wait-queue time | `mongo_pool_wait` events (check-outs ≥ 50 ms) and `mongo_pool_exhausted` on `waitQueueTimeoutMS` expiry |
+| Saleor request rate & latency | count and `duration_ms` of `saleor_call` events |
+| Saleor availability | `outcome` mix of `saleor_call` + `saleor_circuit` state changes + `saleor_circuit` field in `/healthz/ready/` |
 | Queue depth | n/a today — no async queue exists. If Celery/RQ is added, export queue length and oldest-job age from Redis before go-live |
 
 Requests slower than 1 s log at WARNING (`SLOW_REQUEST_MS`).
+
+### Sampling pool usage
+
+```bash
+python manage.py sample_resources --interval 10 --duration 600
+```
+
+Run it during load tests to see *which* resource saturates, and on a short
+cron in production for a continuous capacity signal.
 
 ## Probes
 
@@ -68,6 +97,10 @@ Measured over 30 days, on production traffic, excluding health probes:
   a matching recovery) — page during business hours; catalogue and checkout
   are degraded.
 - p95 latency > 2× SLO for 15 min — ticket.
+- **`queue_ms` p95 > 100 ms for 10 min** — workers are saturated; scale out.
+- `mongo_pool_exhausted` events, or `redis_in_use` sustained near
+  `redis_max`, or `pg_total` above 80 % of `pg_max` — ticket; capacity is
+  about to become an outage.
 - `Rate-limit cache unavailable` or `Lockout cache unavailable` events —
   ticket immediately; brute-force protection is failing open.
 - Repeated 429s from one IP or one username lockout burst — security review.

@@ -288,6 +288,76 @@ class SaleorClientResilienceTests(TestCase):
         self.assertFalse(saleor_client._circuit_is_open())
 
 
+@patch.object(saleor_client, "SALEOR_GRAPHQL_URL", "https://saleor.example.com/graphql/")
+@patch.object(saleor_client, "_backoff_sleep", lambda attempt: None)
+class SaleorTelemetryTests(TestCase):
+    """Upstream request rate, outcome mix, and circuit lifecycle must be
+    derivable from logs (docs/OBSERVABILITY.md)."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_successful_call_logs_one_event(self):
+        response = _mock_response(json_data={"data": {"ok": True}})
+        with patch.object(saleor_client._session, "post", return_value=response), \
+             self.assertLogs("ecommerce.services.saleor_client", level="INFO") as logs:
+            saleor_client.saleor_graphql("query {}", {}, retry=False)
+        events = [r for r in logs.records if getattr(r, "event", "") == "saleor_call"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].outcome, "ok")
+        self.assertEqual(events[0].attempts, 1)
+        self.assertGreaterEqual(events[0].duration_ms, 0)
+
+    def test_failed_call_logs_outcome_code_and_attempts(self):
+        response = _mock_response(status=503)
+        with patch.object(saleor_client._session, "post", return_value=response), \
+             self.assertLogs("ecommerce.services.saleor_client", level="INFO") as logs:
+            with self.assertRaises(SaleorAPIError):
+                saleor_client.saleor_graphql("query {}", {})
+        events = [r for r in logs.records if getattr(r, "event", "") == "saleor_call"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].outcome, "http_error")
+        self.assertEqual(events[0].attempts, 3)  # retries are visible
+
+    def test_open_circuit_logs_fast_fail_without_calling_upstream(self):
+        response = _mock_response(status=500)
+        with patch.object(saleor_client._session, "post", return_value=response):
+            for _ in range(saleor_client.CIRCUIT_FAILURE_THRESHOLD):
+                with self.assertRaises(SaleorAPIError):
+                    saleor_client.saleor_graphql("query {}", {}, retry=False)
+
+        with patch.object(saleor_client._session, "post") as post, \
+             self.assertLogs("ecommerce.services.saleor_client", level="INFO") as logs:
+            with self.assertRaises(SaleorCircuitOpen):
+                saleor_client.saleor_graphql("query {}", {}, retry=False)
+        post.assert_not_called()
+        outcomes = [getattr(r, "outcome", "") for r in logs.records]
+        self.assertIn("circuit_open", outcomes)
+
+    def test_circuit_open_and_close_events_are_paired(self):
+        bad = _mock_response(status=500)
+        good = _mock_response(json_data={"data": {"ok": True}})
+
+        with patch.object(saleor_client._session, "post", return_value=bad), \
+             self.assertLogs("ecommerce.services.saleor_client", level="INFO") as opening:
+            for _ in range(saleor_client.CIRCUIT_FAILURE_THRESHOLD):
+                with self.assertRaises(SaleorAPIError):
+                    saleor_client.saleor_graphql("query {}", {}, retry=False)
+        open_events = [r for r in opening.records
+                       if getattr(r, "event", "") == "saleor_circuit"]
+        self.assertEqual([r.state for r in open_events], ["open"])
+
+        # Cooldown expires, upstream recovers -> a closing event must follow,
+        # so an alert on "circuit open" can auto-resolve
+        cache.delete(saleor_client._CB_OPEN_KEY)
+        with patch.object(saleor_client._session, "post", return_value=good), \
+             self.assertLogs("ecommerce.services.saleor_client", level="INFO") as closing:
+            saleor_client.saleor_graphql("query {}", {}, retry=False)
+        close_events = [r for r in closing.records
+                        if getattr(r, "event", "") == "saleor_circuit"]
+        self.assertEqual([r.state for r in close_events], ["closed"])
+
+
 class ExternalUrlSanitizationTests(TestCase):
     def test_javascript_thumbnail_urls_never_rendered(self):
         evil = make_product(thumbnail={"url": "javascript:alert(1)"})

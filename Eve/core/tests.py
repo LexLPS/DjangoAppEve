@@ -289,6 +289,83 @@ class ObservabilityTests(TestCase):
                 self.client.get(reverse("readiness"))
 
 
+class QueueTimeTests(TestCase):
+    """Time queued before a worker picks the request up — the worker
+    saturation signal (docs/OBSERVABILITY.md)."""
+
+    def test_queue_time_reported_when_proxy_sets_header(self):
+        import time as pytime
+        start = pytime.time() - 0.25  # request accepted 250ms ago
+        with self.assertLogs("eve.requests", level="INFO") as captured:
+            self.client.get(reverse("landing"),
+                            HTTP_X_REQUEST_START=f"t={start:.3f}")
+        record = captured.records[0]
+        self.assertGreater(record.queue_ms, 100)
+
+    def test_absent_header_omits_the_field(self):
+        with self.assertLogs("eve.requests", level="INFO") as captured:
+            self.client.get(reverse("landing"))
+        self.assertFalse(hasattr(captured.records[0], "queue_ms"))
+
+    def test_malformed_or_skewed_values_are_ignored(self):
+        import time as pytime
+        for header in ("garbage", "t=not-a-number",
+                       f"t={pytime.time() + 60:.3f}"):  # clock skew: future
+            with self.assertLogs("eve.requests", level="INFO") as captured:
+                self.client.get(reverse("landing"), HTTP_X_REQUEST_START=header)
+            self.assertFalse(hasattr(captured.records[0], "queue_ms"), header)
+
+
+class ResourceSnapshotTests(TestCase):
+    """Pool telemetry must never break the caller, even when a backend is
+    unreachable."""
+
+    def test_every_backend_reports_stats_or_an_error_never_raises(self):
+        # Backends absent under the test settings (SQLite, LocMem) must be
+        # reported as errors rather than breaking the sampler
+        from .monitoring import snapshot_resources
+        stats = snapshot_resources()
+        for prefix in ("pg", "redis", "mongo"):
+            reported = [key for key in stats if key.startswith(f"{prefix}_")]
+            self.assertTrue(reported, f"{prefix} produced no keys: {stats}")
+
+    def test_snapshot_is_logged_as_a_structured_event(self):
+        from .monitoring import log_resource_snapshot
+        with self.assertLogs("eve.resources", level="INFO") as captured:
+            log_resource_snapshot()
+        self.assertEqual(captured.records[0].event, "resource_snapshot")
+
+
+class MongoPoolListenerTests(TestCase):
+    def test_slow_checkout_is_logged_with_wait_time(self):
+        from unittest.mock import Mock
+
+        from .monitoring import MongoPoolLogger
+        listener = MongoPoolLogger()
+        with self.assertLogs("eve.resources", level="WARNING") as captured:
+            listener.connection_checked_out(Mock(duration=0.4))  # 400ms wait
+        record = captured.records[0]
+        self.assertEqual(record.event, "mongo_pool_wait")
+        self.assertAlmostEqual(record.wait_ms, 400, delta=1)
+
+    def test_fast_checkout_is_not_logged(self):
+        from unittest.mock import Mock
+
+        from .monitoring import MongoPoolLogger
+        listener = MongoPoolLogger()
+        with self.assertNoLogs("eve.resources", level="WARNING"):
+            listener.connection_checked_out(Mock(duration=0.001))
+
+    def test_pool_exhaustion_is_logged(self):
+        from unittest.mock import Mock
+
+        from .monitoring import MongoPoolLogger
+        listener = MongoPoolLogger()
+        with self.assertLogs("eve.resources", level="ERROR") as captured:
+            listener.connection_check_out_failed(Mock(reason="timeout"))
+        self.assertEqual(captured.records[0].event, "mongo_pool_exhausted")
+
+
 class LogRedactionTests(TestCase):
     def _formatted(self, message):
         import logging as pylogging

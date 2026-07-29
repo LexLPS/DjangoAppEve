@@ -356,3 +356,93 @@ class ErrorContractTests(ApiTestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response["Content-Type"], "application/json")
         self.assertEqual(response.json()["error"]["code"], "not_found")
+
+
+class OpenAPISchemaTests(TestCase):
+    """The published contract must stay accurate and machine-consumable."""
+
+    def test_schema_is_served_and_covers_every_endpoint(self):
+        response = self.client.get("/api/v1/schema/?format=json")
+        self.assertEqual(response.status_code, 200)
+        schema = response.json()
+        self.assertEqual(schema["openapi"][:3], "3.0")
+        for path in (
+            "/api/v1/products/", "/api/v1/products/{slug}/", "/api/v1/cart/",
+            "/api/v1/cart/items/", "/api/v1/cart/items/{product_id}/",
+            "/api/v1/checkout/", "/api/v1/orders/", "/api/v1/orders/{saleor_order_id}/",
+            "/api/v1/profile/", "/api/v1/auth/token/",
+        ):
+            self.assertIn(path, schema["paths"], f"{path} missing from the schema")
+
+    def test_schema_generates_without_warnings_or_errors(self):
+        # A schema full of "unable to guess serializer" is worse than none
+        from drf_spectacular.drainage import GENERATOR_STATS
+        from drf_spectacular.generators import SchemaGenerator
+
+        GENERATOR_STATS.reset()
+        SchemaGenerator().get_schema(request=None, public=True)
+        self.assertEqual(len(GENERATOR_STATS._warn_cache), 0, GENERATOR_STATS._warn_cache)
+        self.assertEqual(len(GENERATOR_STATS._error_cache), 0, GENERATOR_STATS._error_cache)
+
+    def test_legacy_unversioned_route_is_not_published(self):
+        schema = self.client.get("/api/v1/schema/?format=json").json()
+        self.assertNotIn("/api/profile/", schema["paths"])
+
+    def test_checkout_documents_the_idempotency_key_header(self):
+        schema = self.client.get("/api/v1/schema/?format=json").json()
+        params = schema["paths"]["/api/v1/checkout/"]["post"]["parameters"]
+        header = next(p for p in params if p["name"] == "Idempotency-Key")
+        self.assertEqual(header["in"], "header")
+        self.assertTrue(header["required"])
+
+    def test_error_envelope_is_part_of_the_published_contract(self):
+        schema = self.client.get("/api/v1/schema/?format=json").json()
+        error = schema["components"]["schemas"]["Error"]["properties"]["error"]
+        self.assertTrue(error)
+        responses = schema["paths"]["/api/v1/cart/"]["get"]["responses"]
+        self.assertIn("401", responses)
+
+    def test_swagger_ui_renders_with_local_assets_under_the_csp(self):
+        response = self.client.get("/api/v1/docs/")
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        # Assets come from our own /static/, never a CDN
+        self.assertNotIn("unpkg.com", body)
+        self.assertNotIn("cdn.jsdelivr.net", body)
+        csp = response["Content-Security-Policy"]
+        self.assertIn("script-src 'self'", csp)  # scripts stay locked down
+        self.assertIn("style-src 'self' 'unsafe-inline'", csp)  # UI needs inline styles
+
+    def test_docs_have_no_inline_script_so_the_strict_csp_cannot_blank_them(self):
+        # Regression: the default Swagger view inlines its bootstrap script,
+        # which script-src 'self' blocks — the page returned 200 but rendered
+        # nothing. The split view serves that script as its own request.
+        import re
+
+        response = self.client.get("/api/v1/docs/")
+        inline = [
+            body for body in re.findall(
+                r"<script(?![^>]*src=)[^>]*>(.*?)</script>",
+                response.content.decode(), re.S,
+            ) if body.strip()
+        ]
+        self.assertEqual(inline, [], "inline scripts are blocked by the CSP")
+        csp = response["Content-Security-Policy"]
+        self.assertIn("script-src 'self'", csp)
+        self.assertNotIn("script-src 'self' 'unsafe-inline'", csp)
+
+    def test_swagger_init_script_is_served_as_its_own_request(self):
+        response = self.client.get("/api/v1/docs/?script=")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("javascript", response["Content-Type"])
+
+    def test_redoc_is_served(self):
+        self.assertEqual(self.client.get("/api/v1/redoc/").status_code, 200)
+
+    def test_site_wide_csp_is_not_weakened_by_the_docs_exception(self):
+        # This assertion covers response security headers, not catalogue I/O.
+        # Keep it independent of a live MongoDB service in CI.
+        with patch("api.v1.views.list_products", return_value=([], False)):
+            response = self.client.get("/api/v1/products/")
+        self.assertIn("style-src 'self'", response["Content-Security-Policy"])
+        self.assertNotIn("unsafe-inline", response["Content-Security-Policy"])

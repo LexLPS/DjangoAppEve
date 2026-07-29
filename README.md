@@ -115,6 +115,8 @@ Health endpoints:
 
 ## Further documentation
 
+- [Architecture decision records](Eve/docs/adr/README.md)
+- [REST API (v1) and OpenAPI schema](Eve/docs/API.md)
 - [Installation and Saleor setup](Eve/docs/SETUP.md)
 - [Deployment architecture](Eve/docs/DEPLOYMENT.md)
 - [Implemented cybersecurity measures](Eve/docs/SECURITY_MEASURES.md)

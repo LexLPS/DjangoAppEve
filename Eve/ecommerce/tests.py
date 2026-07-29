@@ -467,6 +467,60 @@ class AtomicCartServiceTests(TestCase):
         pushed = push_call.args[1]["$push"]["items"]
         self.assertEqual(pushed["variant_id"], None)  # no defaultVariant in fixture
 
+    def test_reading_a_cart_does_not_write(self):
+        # Staging measured ~450ms per Mongo write: reading a cart used to
+        # cost one because get_cart always upserted.
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.find_one.return_value = {"user_id": 7, "items": []}
+            from .services.cart_service import get_cart
+
+            get_cart(7)
+        coll.find_one.assert_called_once()
+        coll.find_one_and_update.assert_not_called()
+
+    def test_missing_cart_is_created_on_first_read(self):
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.find_one.return_value = None
+            from .services.cart_service import get_cart
+
+            get_cart(7)
+        coll.find_one_and_update.assert_called_once()
+
+    def test_incrementing_an_existing_item_costs_two_round_trips(self):
+        coll = self._run_add(matched_existing=True)
+        # $inc plus the clamp - no cart-existence write, no push
+        self.assertEqual(coll.update_one.call_count, 2)
+        coll.find_one_and_update.assert_not_called()
+
+    def test_adding_a_new_item_to_an_existing_cart_costs_two_round_trips(self):
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            # $inc misses, then the push lands on an existing cart document
+            coll.update_one.side_effect = [
+                MagicMock(matched_count=0),  # $inc: item not present
+                MagicMock(matched_count=1),  # $push: cart exists
+            ]
+            from .services.cart_service import add_to_cart
+
+            add_to_cart(7, make_product(), quantity=2)
+        self.assertEqual(coll.update_one.call_count, 2)
+        # A freshly pushed item cannot exceed the cap, so no clamp is issued
+        operators = [list(call.args[1].keys()) for call in coll.update_one.call_args_list]
+        self.assertNotIn(["$set"], operators)
+
+    def test_first_ever_add_creates_the_cart_then_retries_the_push(self):
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.update_one.side_effect = [
+                MagicMock(matched_count=0),  # $inc: no item
+                MagicMock(matched_count=0),  # $push: no cart document yet
+                MagicMock(matched_count=1),  # $push retry after creation
+            ]
+            coll.find_one.return_value = None
+            from .services.cart_service import add_to_cart
+
+            add_to_cart(7, make_product(), quantity=2)
+        coll.find_one_and_update.assert_called_once()  # cart created
+        self.assertEqual(coll.update_one.call_count, 3)  # cold path only
+
     def test_remove_uses_atomic_pull(self):
         with patch("ecommerce.services.cart_service.carts_collection") as coll:
             from .services.cart_service import remove_from_cart

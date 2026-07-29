@@ -1,7 +1,7 @@
 """Saleor webhook signing for the load generator.
 
 Kept free of locust imports so the test suite can verify that signatures
-produced here are accepted by payments.services.saleor_webhooks — if Saleor's
+produced here are accepted by payments.services.saleor_webhooks - if Saleor's
 format or our verifier changes, that test fails instead of the load test
 silently measuring 401s.
 """

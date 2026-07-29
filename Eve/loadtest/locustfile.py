@@ -1,4 +1,4 @@
-"""Eve staging load test — see README.md.
+"""Eve staging load test - see README.md.
 
 Six flows, weighted to approximate real traffic:
   landing / catalogue browsing, product detail (cache hit + miss),
@@ -23,10 +23,10 @@ from config import (  # noqa: E402 - sibling module
     MAX_FAILURE_RATIO,
     P95_BUDGETS_MS,
 )
-from signing import SaleorSigner  # noqa: E402 — sibling module, path set above
+from signing import SaleorSigner  # noqa: E402 - sibling module, path set above
 
 MANIFEST_PATH = os.environ.get("LOADTEST_MANIFEST", DEFAULT_MANIFEST_PATH)
-# Checkout POSTs create real Saleor checkouts — opt in explicitly
+# Checkout POSTs create real Saleor checkouts - opt in explicitly
 CHECKOUT_MODE = os.environ.get("LOADTEST_CHECKOUT", "guard")  # guard | full
 
 # SLO budgets in ms, as (p50, p95, p99) per request name.
@@ -191,7 +191,7 @@ class ShopperUser(HttpUser):
 
 
 class WebhookBurstUser(HttpUser):
-    """Saleor delivering signed order events, in bursts rather than evenly —
+    """Saleor delivering signed order events, in bursts rather than evenly -
     verification (JWKS + RSA) and the row-locked update are the hot path."""
 
     weight = 1
@@ -202,7 +202,9 @@ class WebhookBurstUser(HttpUser):
         if SIGNER is None:
             # Manifest seeded without --with-webhook-key: skip this stage
             # instead of aborting the whole run
-            print("No webhook key in the manifest — skipping the webhook stage "
+            # ASCII only: Windows consoles use legacy code pages (cp932,
+            # cp1252) that raise UnicodeEncodeError on non-ASCII output.
+            print("No webhook key in the manifest: skipping the webhook stage "
                   "(re-seed with --with-webhook-key to include it).")
             raise StopUser()
         self.order_ids = list(MANIFEST["order_ids"])
@@ -235,6 +237,31 @@ class WebhookBurstUser(HttpUser):
         gevent.joinall(greenlets)
 
 
+# Client-observed time vs the app's own Server-Timing header. A large gap
+# means the request was queueing (worker saturation) or on the network -
+# not that the view is slow.
+_OVERHEAD = {"server_ms": [], "client_ms": []}
+
+
+@events.request.add_listener
+def _record_server_timing(response_time, response, **kwargs):
+    header = getattr(response, "headers", {}).get("Server-Timing", "") if response else ""
+    for part in header.split(","):
+        if part.strip().startswith("app;dur="):
+            try:
+                _OVERHEAD["server_ms"].append(float(part.split("=", 1)[1]))
+                _OVERHEAD["client_ms"].append(response_time)
+            except (ValueError, IndexError):
+                pass
+
+
+def _percentile(values, quantile):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return ordered[min(int(len(ordered) * quantile), len(ordered) - 1)]
+
+
 @events.quitting.add_listener
 def enforce_slos(environment, **kwargs):
     """Fail the run when SLOs are missed, so CI/release gates can rely on it."""
@@ -258,6 +285,25 @@ def enforce_slos(environment, **kwargs):
                 failures.append(
                     f"{name} p{int(quantile * 100)} {observed:.0f}ms > {budget_ms}ms"
                 )
+
+    server = _OVERHEAD["server_ms"]
+    if server:
+        client = _OVERHEAD["client_ms"]
+        overhead = [c - s for c, s in zip(client, server, strict=True)]
+        print(
+            "\nWhere the time went (n={}):\n"
+            "  in the app (Server-Timing) p50 {:.0f}ms  p95 {:.0f}ms\n"
+            "  client observed            p50 {:.0f}ms  p95 {:.0f}ms\n"
+            "  queue + network overhead   p50 {:.0f}ms  p95 {:.0f}ms".format(
+                len(server),
+                _percentile(server, 0.50), _percentile(server, 0.95),
+                _percentile(client, 0.50), _percentile(client, 0.95),
+                _percentile(overhead, 0.50), _percentile(overhead, 0.95),
+            )
+        )
+        if _percentile(overhead, 0.95) > _percentile(server, 0.95):
+            print("  => dominated by queueing/network: scale workers or replicas,")
+            print("     not application code.")
 
     if failures:
         environment.process_exit_code = 1

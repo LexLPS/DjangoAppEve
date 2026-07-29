@@ -97,7 +97,7 @@ class Command(BaseCommand):
 
         # A synthetic product in the Mongo cache makes the cache-hit flow
         # deterministic instead of depending on the staging catalogue.
-        # Expires with PRODUCT_CACHE_TTL_SECONDS — re-seed for long runs.
+        # Expires with PRODUCT_CACHE_TTL_SECONDS - re-seed for long runs.
         from ecommerce.services.mongo_client import cache_product
         cache_product({
             "id": "LOADTEST-PRODUCT-1",

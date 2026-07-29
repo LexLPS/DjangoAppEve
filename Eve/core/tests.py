@@ -765,3 +765,49 @@ class DeploymentResilienceTests(TestCase):
         with patch("core.management.commands.release_preflight.call_command") as call:
             Command(stdout=None, stderr=None).handle(migrate=False, schema_only=True)
         self.assertEqual([args.args[0] for args in call.call_args_list], ["check", "migrate"])
+
+
+class GunicornSizingTests(TestCase):
+    """Worker sizing must follow the container's CPU quota, not the host's
+    core count - the latter oversubscribes small managed instances."""
+
+    def _config(self):
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "gunicorn.conf.py"
+        spec = importlib.util.spec_from_file_location("gunicorn_conf", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_reads_the_cgroup_v2_quota_not_the_host_cpu_count(self):
+        from unittest.mock import mock_open, patch
+
+        config = self._config()
+        # Half a CPU allocated, host reports 32 cores
+        with patch("builtins.open", mock_open(read_data="50000 100000")), \
+             patch("multiprocessing.cpu_count", return_value=32):
+            self.assertAlmostEqual(config.detect_cpus(), 0.5)
+
+    def test_unlimited_quota_falls_back_to_cpu_count(self):
+        from unittest.mock import mock_open, patch
+
+        config = self._config()
+        with patch("builtins.open", mock_open(read_data="max 100000")), \
+             patch("multiprocessing.cpu_count", return_value=4):
+            self.assertEqual(config.detect_cpus(), 4.0)
+
+    def test_missing_cgroup_files_fall_back_to_cpu_count(self):
+        from unittest.mock import patch
+
+        config = self._config()
+        with patch("builtins.open", side_effect=OSError), \
+             patch("multiprocessing.cpu_count", return_value=2):
+            self.assertEqual(config.detect_cpus(), 2.0)
+
+    def test_worker_pool_is_bounded(self):
+        # A huge host must never translate into a huge pool
+        config = self._config()
+        self.assertLessEqual(config.workers, 9)
+        self.assertGreaterEqual(config.workers, 2)

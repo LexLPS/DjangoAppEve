@@ -31,11 +31,23 @@ Configured in `gunicorn.conf.py`; tune via environment:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GUNICORN_WORKERS` | `2×CPU+1` | worker processes per pod |
-| `GUNICORN_THREADS` | 1 | threads per worker |
+| `GUNICORN_WORKERS` | `2×allocated CPU+1`, clamped to 2-9 | worker processes per pod |
+| `GUNICORN_THREADS` | 4 | threads per worker |
+| `GUNICORN_WORKER_CLASS` | `gthread` | threaded workers keep serving while waiting on I/O |
 | `GUNICORN_FORWARDED_ALLOW_IPS` | `127.0.0.1` | proxies allowed to set forwarded headers |
 
 Workers recycle after ~1000 requests (with jitter) to bound leaks.
+
+**CPU detection is container-aware.** `multiprocessing.cpu_count()` reports
+the *host's* cores from inside a container, so sizing the pool from it can
+spawn dozens of processes on an instance limited to a fraction of a core -
+which presents as application slowness, not as a configuration error. The
+config reads the cgroup quota instead and logs the effective sizing at boot
+(`gunicorn sizing: N workers x M threads ...`); check that line in the
+deployment logs after any plan or instance change.
+
+Connection budget: each pod can open `workers x threads` PostgreSQL
+connections. Keep `pods x workers x threads` under `max_connections`.
 
 ## Statelessness
 

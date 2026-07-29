@@ -17,8 +17,13 @@ client ──TLS──> load balancer / nginx ──> gunicorn (N stateless web 
   `requirements.lock`, static files are collected at build time, and the app
   runs as an unprivileged user under Gunicorn.
 - `docker-compose.yml` runs the full production-shaped stack locally
-  (nginx → gunicorn + PostgreSQL, MongoDB, Redis with `volatile-lru`).
+  (nginx → gunicorn + Celery worker/Beat, PostgreSQL, MongoDB, cache Redis,
+  and a persistent no-eviction broker Redis).
 - Release steps per deploy: `migrate`, `ensure_indexes`, roll pods.
+
+Celery workers are independently scalable and Beat must remain a singleton.
+See `docs/BACKGROUND_JOBS.md` for Railway commands, queue isolation, recovery,
+and deployment order.
 
 ## Gunicorn
 

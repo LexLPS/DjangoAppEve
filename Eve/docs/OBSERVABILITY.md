@@ -48,7 +48,7 @@ listener.
 | MongoDB wait-queue time | `mongo_pool_wait` events (check-outs ≥ 50 ms) and `mongo_pool_exhausted` on `waitQueueTimeoutMS` expiry |
 | Saleor request rate & latency | count and `duration_ms` of `saleor_call` events |
 | Saleor availability | `outcome` mix of `saleor_call` + `saleor_circuit` state changes + `saleor_circuit` field in `/healthz/ready/` |
-| Queue depth | n/a today — no async queue exists. If Celery/RQ is added, export queue length and oldest-job age from Redis before go-live |
+| Queue depth | `queue_<name>_depth` in `resource_snapshot`; durable payment backlog uses `webhook_pending` and `webhook_oldest_seconds` |
 
 Requests slower than 1 s log at WARNING (`SLOW_REQUEST_MS`).
 

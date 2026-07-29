@@ -342,3 +342,9 @@ matches this guide.
 This is usually an intentional fail-closed check. Review the error for a
 missing secret, insecure backend URL, default database password, absent Redis,
 or non-HTTPS Saleor/JWKS endpoint.
+
+### Celery tasks do not run
+
+Confirm the dedicated broker is reachable through `CELERY_BROKER_URL`, at
+least one worker consumes the configured queues, and exactly one Beat service
+is running. See `docs/BACKGROUND_JOBS.md`.

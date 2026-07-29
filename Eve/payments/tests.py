@@ -11,7 +11,7 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
-from .models import Order
+from .models import Order, WebhookEvent
 from .services.saleor_webhooks import WebhookSignatureError
 
 TEST_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -168,15 +168,16 @@ class WebhookTests(TestCase):
 
     def _post(self, payload, signature=None, private_key=TEST_PRIVATE_KEY):
         body, computed = _signed(payload, private_key)
-        return self.client.post(
-            self.url, data=body, content_type="application/json",
-            headers={"Saleor-Signature": signature or computed},
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            return self.client.post(
+                self.url, data=body, content_type="application/json",
+                headers={"Saleor-Signature": signature or computed},
+            )
 
     def test_valid_signature_marks_order_paid(self):
         response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "ORD1"}})
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
 
@@ -212,7 +213,9 @@ class WebhookTests(TestCase):
         payload = {"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}}
         self._post(payload)
         response = self._post(payload)  # same event again
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.json()["duplicate"])
+        self.assertEqual(WebhookEvent.objects.count(), 1)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PAID)
 
@@ -221,7 +224,8 @@ class WebhookTests(TestCase):
         self.order.save()
         response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "ORD1"}})
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(WebhookEvent.objects.get().status, WebhookEvent.Status.REJECTED)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.REFUNDED)
 
@@ -230,15 +234,17 @@ class WebhookTests(TestCase):
         self.order.save()
         response = self._post({"__typename": "OrderRefunded",
                                "order": {"id": "ORD1"}})
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 202)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.REFUNDED)
 
     def test_unknown_order_acknowledged_without_changes(self):
         response = self._post({"__typename": "OrderFullyPaid",
                                "order": {"id": "GHOST"}})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"handled": False})
+        self.assertEqual(response.status_code, 202)
+        event = WebhookEvent.objects.get()
+        self.assertEqual(event.status, WebhookEvent.Status.PENDING)
+        self.assertEqual(event.last_error, "unknown_order")
 
     def test_malformed_payload_rejected(self):
         body = b"not json"
@@ -254,6 +260,49 @@ class WebhookTests(TestCase):
             headers={"Saleor-Signature": signature},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_broker_failure_leaves_durable_pending_event(self):
+        payload = {"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}}
+        body, signature = _signed(payload)
+        with patch(
+            "payments.tasks.process_webhook_event.delay",
+            side_effect=ConnectionError("broker unavailable"),
+        ), self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                self.url,
+                data=body,
+                content_type="application/json",
+                headers={"Saleor-Signature": signature},
+            )
+        self.assertEqual(response.status_code, 202)
+        event = WebhookEvent.objects.get()
+        self.assertEqual(event.status, WebhookEvent.Status.PENDING)
+        self.assertEqual(self.order.status, Order.Status.PENDING)
+
+    def test_inbox_stores_only_minimum_safe_payload(self):
+        self._post({
+            "__typename": "OrderFullyPaid",
+            "order": {"id": "ORD1", "userEmail": "private@example.com"},
+        })
+        payload = WebhookEvent.objects.get().payload
+        self.assertEqual(
+            payload,
+            {"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}},
+        )
+
+    def test_recovery_republishes_pending_events(self):
+        from payments.tasks import recover_pending_webhooks
+
+        event = WebhookEvent.objects.create(
+            fingerprint="a" * 64,
+            event_type="OrderFullyPaid",
+            saleor_order_id="ORD1",
+            payload={"__typename": "OrderFullyPaid", "order": {"id": "ORD1"}},
+        )
+        with patch("payments.tasks.process_webhook_event.delay") as delay:
+            queued = recover_pending_webhooks.run()
+        self.assertEqual(queued, 1)
+        delay.assert_called_once_with(event.pk)
 
 
 class OrderOwnershipTests(TestCase):
@@ -357,12 +406,13 @@ class EndToEndOrderJourneyTests(TestCase):
         payload = {"__typename": "OrderFullyPaid", "order": {"id": "ORD-E2E"}}
         body, signature = _signed(payload)
         for _ in range(2):
-            response = self.client.post(
-                reverse("saleor_webhook"), data=body,
-                content_type="application/json",
-                headers={"Saleor-Signature": signature},
-            )
-            self.assertEqual(response.status_code, 200)
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(
+                    reverse("saleor_webhook"), data=body,
+                    content_type="application/json",
+                    headers={"Saleor-Signature": signature},
+                )
+            self.assertEqual(response.status_code, 202)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PAID)
         self.assertEqual(Order.objects.count(), 1)
@@ -375,12 +425,13 @@ class EndToEndOrderJourneyTests(TestCase):
         # Refund webhook completes the lifecycle
         body, signature = _signed(
             {"__typename": "OrderRefunded", "order": {"id": "ORD-E2E"}})
-        response = self.client.post(
-            reverse("saleor_webhook"), data=body,
-            content_type="application/json",
-            headers={"Saleor-Signature": signature},
-        )
-        self.assertEqual(response.status_code, 200)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                reverse("saleor_webhook"), data=body,
+                content_type="application/json",
+                headers={"Saleor-Signature": signature},
+            )
+        self.assertEqual(response.status_code, 202)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.REFUNDED)
 

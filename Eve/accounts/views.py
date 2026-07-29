@@ -8,9 +8,7 @@ from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.models import User
 from django.core import signing
 from django.core.cache import cache
-from django.core.mail import send_mail
 from django.shortcuts import redirect, render
-from django.urls import reverse
 from django.views.decorators.http import require_POST
 
 from .forms import RegistrationForm
@@ -57,20 +55,12 @@ def _notify_lockout(username: str):
     user = User.objects.filter(username=username).first()
     if not user or not user.email:
         return
+    from .tasks import send_lockout_email
+
     try:
-        send_mail(
-            "Your Eve account was temporarily locked",
-            f"Hi {user.username},\n\n"
-            "There were repeated failed sign-in attempts on your account, so "
-            "sign-in has been paused for about 15 minutes as a precaution.\n\n"
-            "If this was you, simply wait and try again. If it was not you, "
-            "we recommend resetting your password once sign-in is available "
-            "again. Your password has not been changed.",
-            None,  # DEFAULT_FROM_EMAIL
-            [user.email],
-        )
+        send_lockout_email.delay(user.pk)
     except Exception:
-        logger.exception("Could not send lockout notification")
+        logger.exception("Could not queue lockout notification")
 
 
 def _clear_failures(username: str):
@@ -80,18 +70,10 @@ def _clear_failures(username: str):
         logger.exception("Lockout cache unavailable; could not clear failures")
 
 
-def _send_verification_email(request, user):
-    token = signing.dumps({"uid": user.pk}, salt=EMAIL_TOKEN_SALT)
-    url = request.build_absolute_uri(reverse("verify_email", args=[token]))
-    send_mail(
-        "Verify your Eve email address",
-        f"Hi {user.username},\n\n"
-        f"Please confirm your email address by opening this link:\n{url}\n\n"
-        "The link is valid for 3 days. If you did not create an Eve account, "
-        "you can ignore this message.",
-        None,  # DEFAULT_FROM_EMAIL
-        [user.email],
-    )
+def _send_verification_email(user):
+    from .tasks import send_verification_email
+
+    send_verification_email.delay(user.pk)
 
 
 @rate_limit("register", limit=5, window_seconds=3600)
@@ -102,7 +84,7 @@ def register_view(request):
             user = form.save()
             Profile.objects.get_or_create(user=user)
             try:
-                _send_verification_email(request, user)
+                _send_verification_email(user)
             except Exception:
                 logger.exception("Could not send verification email")
             login(request, user)
@@ -184,7 +166,7 @@ def resend_verification_view(request):
     profile, _ = Profile.objects.get_or_create(user=request.user)
     if not profile.email_verified:
         try:
-            _send_verification_email(request, request.user)
+            _send_verification_email(request.user)
             messages.success(request, "Verification email sent.")
         except Exception:
             logger.exception("Could not send verification email")

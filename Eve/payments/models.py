@@ -49,3 +49,36 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order {self.saleor_order_id} for {self.user.username} [{self.status}]"
+
+
+class WebhookEvent(models.Model):
+    """Durable, deduplicated inbox for signature-verified Saleor events."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSED = "processed", "Processed"
+        IGNORED = "ignored", "Ignored"
+        REJECTED = "rejected", "Rejected"
+
+    fingerprint = models.CharField(max_length=64, unique=True)
+    event_type = models.CharField(max_length=64)
+    saleor_order_id = models.CharField(max_length=100)
+    payload = models.JSONField()
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    attempts = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=100, blank=True, default="")
+    received_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["status", "received_at"],
+                name="payments_we_status_2225cf_idx",
+            )
+        ]
+
+    def __str__(self):
+        return f"Saleor {self.event_type} for {self.saleor_order_id} [{self.status}]"

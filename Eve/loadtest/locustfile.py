@@ -18,7 +18,11 @@ from locust import HttpUser, between, events, tag, task
 from locust.exception import StopUser
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from config import DEFAULT_MANIFEST_PATH  # noqa: E402 - sibling module
+from config import (  # noqa: E402 - sibling module
+    DEFAULT_MANIFEST_PATH,
+    MAX_FAILURE_RATIO,
+    P95_BUDGETS_MS,
+)
 from signing import SaleorSigner  # noqa: E402 — sibling module, path set above
 
 MANIFEST_PATH = os.environ.get("LOADTEST_MANIFEST", DEFAULT_MANIFEST_PATH)
@@ -29,20 +33,17 @@ CHECKOUT_MODE = os.environ.get("LOADTEST_CHECKOUT", "guard")  # guard | full
 # p50 catches a slow baseline, p95 is the headline SLO
 # (docs/OBSERVABILITY.md), p99 catches tail latency that p95 hides.
 SLO_BUDGETS_MS = {
-    "GET /":                            (200, 500, 1000),
-    "GET /shop/catalogue/":             (200, 500, 1000),
-    "GET /shop/product/[hit]":          (200, 500, 1000),
+    "GET /":                            (200, P95_BUDGETS_MS["GET /"], 1000),
+    "GET /shop/catalogue/":             (200, P95_BUDGETS_MS["GET /shop/catalogue/"], 1000),
+    "GET /shop/product/[hit]":          (200, P95_BUDGETS_MS["GET /shop/product/[hit]"], 1000),
     # A miss is allowed one upstream Saleor call
-    "GET /shop/product/[miss]":         (400, 800, 1500),
+    "GET /shop/product/[miss]":         (400, P95_BUDGETS_MS["GET /shop/product/[miss]"], 1500),
     # Login is dominated by PBKDF2 password hashing (deliberately slow)
-    "POST /accounts/login/":            (600, 1000, 1500),
-    "POST /shop/cart/add/":             (200, 500, 1000),
-    "GET /shop/cart/":                  (200, 500, 1000),
-    "POST /payments/webhooks/saleor/":  (150, 300, 600),
+    "POST /accounts/login/":            (600, P95_BUDGETS_MS["POST /accounts/login/"], 1500),
+    "POST /shop/cart/add/":             (200, P95_BUDGETS_MS["POST /shop/cart/add/"], 1000),
+    "GET /shop/cart/":                  (200, P95_BUDGETS_MS["GET /shop/cart/"], 1000),
+    "POST /payments/webhooks/saleor/":  (150, P95_BUDGETS_MS["POST /payments/webhooks/saleor/"], 600),
 }
-MAX_FAILURE_RATIO = 0.01
-
-
 def load_manifest():
     try:
         with open(MANIFEST_PATH, encoding="utf-8") as handle:

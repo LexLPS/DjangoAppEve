@@ -23,6 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = config("DJANGO_SECRET_KEY", default="dev-unsafe-secret")
+SECRET_KEY_FALLBACKS = config("DJANGO_SECRET_KEY_FALLBACKS", default="", cast=Csv())
 
 # Safe default; overridden by dev.py / prod.py
 DEBUG = False
@@ -136,6 +137,16 @@ CHECKOUT_RECOVERY_GRACE_SECONDS = config(
 CONTACT_MESSAGE_RETENTION_DAYS = config("CONTACT_MESSAGE_RETENTION_DAYS", default=365, cast=int)
 ABANDONED_CART_RETENTION_DAYS = config("ABANDONED_CART_RETENTION_DAYS", default=365, cast=int)
 WEBHOOK_EVENT_RETENTION_DAYS = config("WEBHOOK_EVENT_RETENTION_DAYS", default=90, cast=int)
+
+# Backup evidence is supplied by provider automation, never by application
+# code. `audit_data_protection` fails when evidence is absent or stale.
+POSTGRES_BACKUP_LAST_SUCCESS_AT = config("POSTGRES_BACKUP_LAST_SUCCESS_AT", default="")
+MONGODB_BACKUP_LAST_SUCCESS_AT = config("MONGODB_BACKUP_LAST_SUCCESS_AT", default="")
+RESTORE_TEST_LAST_SUCCESS_AT = config("RESTORE_TEST_LAST_SUCCESS_AT", default="")
+BACKUP_MAX_AGE_HOURS = config("BACKUP_MAX_AGE_HOURS", default=36, cast=int)
+RESTORE_TEST_MAX_AGE_DAYS = config("RESTORE_TEST_MAX_AGE_DAYS", default=100, cast=int)
+BACKUP_ENCRYPTION_CONFIRMED = config("BACKUP_ENCRYPTION_CONFIRMED", default=False, cast=bool)
+BACKUP_OFFSITE_CONFIRMED = config("BACKUP_OFFSITE_CONFIRMED", default=False, cast=bool)
 
 # --- Cache / sessions: Redis when REDIS_URL is set, else per-process memory.
 # Production requires REDIS_URL (prod.py) so rate limits, lockouts, and

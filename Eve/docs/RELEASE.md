@@ -57,14 +57,16 @@ Vault) at runtime — and are injected as environment variables. Rules:
    authenticated sessions, cart mutations, checkout, and signed webhook
    bursts, and exits non-zero when the SLOs in docs/OBSERVABILITY.md are
    missed. Also confirm no resource exhaustion (DB connections, Redis
-   pool, worker saturation) and archive the `--csv` artifacts with the
-   sign-off.
+   pool, worker saturation). Require `python -m loadtest.evaluate` to pass and
+   archive the Locust CSV, resource JSONL, evaluator report, app commit, and
+   service sizes with the sign-off.
 2. **Final security review:** re-run the full CI security gates; verify the
    go-live checklist — checkout enablement runbook completed (integration
    tests green against production Saleor, RS256 webhook round-trip verified), admin MFA
    devices provisioned, `audit_admins` clean, backups + restore test done
    within the last quarter, alerting wired to a paged channel, secrets
-   rotated out of any pre-launch values, and a penetration test or external
+   rotated out of any pre-launch values, `manage.py audit_data_protection`
+   passes, and a penetration test or external
    review for the payment flow.
 3. Sign-off recorded (who, when, what was verified) before
    `CHECKOUT_ENABLED=True` reaches production.

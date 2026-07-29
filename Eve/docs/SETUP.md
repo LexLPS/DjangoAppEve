@@ -258,6 +258,7 @@ The complete safe template is `.env.example`. Important groups are:
 | Proxy | `DJANGO_TRUSTED_PROXIES`, `GUNICORN_FORWARDED_ALLOW_IPS` | Trust only the actual reverse proxy. Railway currently uses `100.64.0.0/10` for the observed edge peer range. |
 | Admin | `DJANGO_ADMIN_URL`, `DJANGO_ADMIN_REQUIRE_MFA`, `DJANGO_ADMIN_ALLOWED_IPS` | MFA defaults on in production. |
 | Monitoring | `LOG_FORMAT`, `LOG_LEVEL`, `SENTRY_DSN`, `SENTRY_TRACES_SAMPLE_RATE` | JSON logs are recommended in production. |
+| Recovery evidence | `POSTGRES_BACKUP_LAST_SUCCESS_AT`, `MONGODB_BACKUP_LAST_SUCCESS_AT`, `RESTORE_TEST_LAST_SUCCESS_AT`, `BACKUP_ENCRYPTION_CONFIRMED`, `BACKUP_OFFSITE_CONFIRMED` | Updated only by trusted provider automation; verified by `audit_data_protection`. |
 
 Boolean values use `True` or `False`. Comma-separated variables must not be
 wrapped in JSON syntax.

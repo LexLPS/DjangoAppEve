@@ -22,7 +22,8 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: Eve/requirements.lock
-      - run: pip install -r requirements.lock
+      - run: pip install --no-deps -r requirements.lock
+      - run: pip check
       - run: python manage.py test --settings=eve.settings.test --verbosity=2
         env:
           DJANGO_ENV: dev
@@ -60,7 +61,8 @@ jobs:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: Eve/requirements.lock
-      - run: pip install -r requirements.lock
+      - run: pip install --no-deps -r requirements.lock
+      - run: pip check
       - run: python manage.py check --deploy --fail-level WARNING
 
   dependency-audit:

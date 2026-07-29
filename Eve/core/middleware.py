@@ -101,6 +101,14 @@ class RequestMetricsMiddleware:
         queue_ms = self._queue_ms(request)
         if queue_ms is not None:
             payload["queue_ms"] = queue_ms
+
+        # Standard Server-Timing header: lets any client (browser devtools,
+        # the load generator) separate time spent *in the application* from
+        # time spent queueing or on the network, without log access.
+        timings = [f"app;dur={duration_ms}", f"db;dur={payload['db_ms']}"]
+        if queue_ms is not None:
+            timings.append(f"queue;dur={queue_ms}")
+        response.headers["Server-Timing"] = ", ".join(timings)
         request_logger.log(
             level,
             "%s %s -> %d in %sms",

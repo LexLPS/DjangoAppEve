@@ -105,3 +105,33 @@ rm loadtest/manifest.json
 
 Then unset `RATE_LIMIT_SCALE` and redeploy. Record the run (date, profile,
 results, anomalies) in the release sign-off.
+
+## Diagnosing a failed run
+
+Read the **minimum** column before the percentiles. The minimum is what the
+endpoint costs with no contention; the spread between minimum and p95 is
+queueing.
+
+| Pattern | Meaning | Act on |
+|---|---|---|
+| Low min, high p95 (large spread) | Contention: requests are waiting, not working | Worker/replica capacity, CPU quota |
+| High min, low spread | Genuine fixed cost in that endpoint | The work itself (upstream call, hashing, round-trips) |
+
+The run also prints a **"Where the time went"** block, comparing the client's
+observed latency against the app's own `Server-Timing: app;dur=...` header.
+If the queue+network overhead exceeds the in-app time, the application code
+is not the bottleneck - capacity is.
+
+Worked example (staging warm-up, 20 users, 5.4 req/s):
+
+- `GET /` (a static page, no I/O): min 25 ms, p95 1900 ms - a 76x spread
+  proved contention, not code. Caching and upstream latency were ruled out
+  by that single number.
+- `GET /shop/catalogue/`: min 38 ms proved the Mongo product cache was
+  working; a Saleor round-trip could never return that fast.
+- `GET /shop/product/[miss]`: min 1303 ms with only a 1.9x spread - genuine
+  upstream Saleor latency on the miss path.
+- `POST /accounts/login/`: min 3937 ms - CPU-bound password hashing on a
+  throttled vCPU, not queueing.
+- `GET /shop/cart/`: min 469 ms for a single cart read, which is what
+  exposed `get_cart()` performing a write on every read.

@@ -347,6 +347,35 @@ class ResourceSnapshotTests(TestCase):
             log_resource_snapshot()
         self.assertEqual(captured.records[0].event, "resource_snapshot")
 
+    @patch("ecommerce.services.mongo_client.mongo_db")
+    def test_mongo_stats_uses_database_scoped_command(self, mongo_db):
+        from .monitoring import _mongo_stats
+
+        mongo_db.command.return_value = {
+            "collections": 3,
+            "objects": 12,
+            "dataSize": 1.5,
+            "storageSize": 2.0,
+            "indexes": 4,
+            "indexSize": 0.25,
+        }
+
+        stats = _mongo_stats()
+
+        mongo_db.command.assert_called_once_with({"dbStats": 1, "scale": 1024 * 1024})
+        self.assertEqual(stats["mongo_collections"], 3)
+        self.assertEqual(stats["mongo_data_mb"], 1.5)
+        self.assertEqual(stats["mongo_index_mb"], 0.25)
+        self.assertNotIn("mongo_error", stats)
+
+    @patch("ecommerce.services.mongo_client.mongo_db")
+    def test_mongo_stats_reports_permission_failure_without_raising(self, mongo_db):
+        from .monitoring import _mongo_stats
+
+        mongo_db.command.side_effect = PermissionError("denied")
+
+        self.assertEqual(_mongo_stats(), {"mongo_error": "PermissionError"})
+
     def test_snapshot_reports_uncertain_checkout_backlog(self):
         from django.contrib.auth.models import User
         from payments.models import CheckoutAttempt

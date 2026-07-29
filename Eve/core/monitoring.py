@@ -90,15 +90,24 @@ def _redis_stats():
 
 
 def _mongo_stats():
-    """Server-reported connection counts (process-local pool size is not
-    exposed by pymongo)."""
+    """Database-level Atlas statistics plus the configured client pool cap.
+
+    Atlas application users commonly cannot run the cluster-wide
+    ``serverStatus`` command. ``dbStats`` stays within the application's
+    database and works with least-privilege database roles.
+    """
     try:
-        from ecommerce.services.mongo_client import client as mongo
-        server_status = mongo.admin.command("serverStatus")
-        connections = server_status.get("connections", {})
+        from ecommerce.services.mongo_client import mongo_db
+
+        megabyte = 1024 * 1024
+        database_stats = mongo_db.command({"dbStats": 1, "scale": megabyte})
         return {
-            "mongo_current": connections.get("current"),
-            "mongo_available": connections.get("available"),
+            "mongo_collections": database_stats.get("collections"),
+            "mongo_objects": database_stats.get("objects"),
+            "mongo_data_mb": database_stats.get("dataSize"),
+            "mongo_storage_mb": database_stats.get("storageSize"),
+            "mongo_indexes": database_stats.get("indexes"),
+            "mongo_index_mb": database_stats.get("indexSize"),
             "mongo_max_pool": settings.MONGODB.get("MAX_POOL_SIZE"),
         }
     except Exception as exc:

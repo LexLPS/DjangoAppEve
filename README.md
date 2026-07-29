@@ -119,6 +119,7 @@ Health endpoints:
 - [Deployment architecture](Eve/docs/DEPLOYMENT.md)
 - [Security operations](Eve/docs/SECURITY_OPERATIONS.md)
 - [Observability and alerts](Eve/docs/OBSERVABILITY.md)
+- [Background jobs and Celery operations](Eve/docs/BACKGROUND_JOBS.md)
 - [Release process](Eve/docs/RELEASE.md)
 - [Threat model](Eve/docs/THREAT_MODEL.md)
 

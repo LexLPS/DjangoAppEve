@@ -13,6 +13,7 @@ services:
       DB_HOST: postgres
       MONGODB_URI: "mongodb://mongo:27017"
       REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://broker:6379/0"
       GUNICORN_FORWARDED_ALLOW_IPS: "*"   # only nginx can reach this port
       DJANGO_TRUSTED_PROXIES: ""           # set to the nginx container IP/CIDR
     expose:
@@ -23,6 +24,39 @@ services:
       - postgres
       - mongo
       - redis
+      - broker
+
+  worker:
+    build: .
+    env_file: .env
+    command: celery -A eve worker -l INFO -Q webhooks,orders,email,catalogue,maintenance,celery
+    environment:
+      DJANGO_ENV: dev
+      DB_HOST: postgres
+      MONGODB_URI: "mongodb://mongo:27017"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://broker:6379/0"
+    depends_on:
+      - postgres
+      - mongo
+      - redis
+      - broker
+
+  beat:
+    build: .
+    env_file: .env
+    command: celery -A eve beat -l INFO
+    environment:
+      DJANGO_ENV: dev
+      DB_HOST: postgres
+      MONGODB_URI: "mongodb://mongo:27017"
+      REDIS_URL: "redis://redis:6379/0"
+      CELERY_BROKER_URL: "redis://broker:6379/0"
+    depends_on:
+      - postgres
+      - mongo
+      - redis
+      - broker
 
   nginx:
     image: nginx:1.27-alpine
@@ -55,7 +89,14 @@ services:
       --maxmemory 128mb
       --maxmemory-policy volatile-lru
 
+  broker:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes:
+      - broker_data:/data
+
 volumes:
   static_files:
   pg_data:
   mongo_data:
+  broker_data:

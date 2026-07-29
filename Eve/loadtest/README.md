@@ -78,7 +78,7 @@ Target a subset with tags: `--tags browse`, `cache`, `cart`, `checkout`,
   `mongo_current`, any `mongo_pool_wait` / `mongo_pool_exhausted` events,
   and `queue_ms` in the `http_request` events (rising queue time with flat
   `duration_ms` = worker saturation). See docs/OBSERVABILITY.md.
-- Webhook stage returns 200/409 only — a 401 means the seeded key expired.
+- Webhook stage returns 202 only — a 401 means the seeded key expired.
 
 ## 5. Clean up
 

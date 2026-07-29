@@ -7,7 +7,7 @@ Run this daily and alert when discrepancies appear.
 import logging
 
 from django.contrib.auth.models import User
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from ecommerce.services.saleor_client import SaleorAPIError, saleor_graphql
 
 from payments.models import Order
@@ -49,7 +49,7 @@ class Command(BaseCommand):
             nodes = [edge["node"] for edge in data["orders"]["edges"]]
         except (SaleorAPIError, KeyError, TypeError) as exc:
             self.stderr.write(self.style.ERROR(f"Could not fetch Saleor orders: {exc}"))
-            raise SystemExit(1) from None
+            raise CommandError("Saleor order reconciliation failed") from None
 
         saleor_ids = [n["id"] for n in nodes if isinstance(n, dict) and n.get("id")]
         known = set(

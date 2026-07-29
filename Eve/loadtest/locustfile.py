@@ -217,8 +217,8 @@ class WebhookBurstUser(HttpUser):
         ) as response:
             if response.status_code == 401:
                 response.failure("signature rejected (JWKS key expired? re-seed)")
-            elif response.status_code in (200, 409):
-                response.success()  # 409 = refused invalid transition, by design
+            elif response.status_code == 202:
+                response.success()
 
     @tag("webhook")
     @task

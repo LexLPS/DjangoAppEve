@@ -446,6 +446,7 @@ class RetentionTests(TestCase):
 
         from django.core.management import call_command
         from django.utils import timezone
+        from payments.models import WebhookEvent
 
         fresh = ContactMessage.objects.create(
             name="new", email="new@example.com", subject="s", message="m")
@@ -453,6 +454,22 @@ class RetentionTests(TestCase):
             name="old", email="old@example.com", subject="s", message="m")
         ContactMessage.objects.filter(pk=stale.pk).update(
             created_at=timezone.now() - timedelta(days=400))
+        old_processed = WebhookEvent.objects.create(
+            fingerprint="b" * 64,
+            event_type="OrderFullyPaid",
+            saleor_order_id="OLD",
+            payload={},
+            status=WebhookEvent.Status.PROCESSED,
+        )
+        old_pending = WebhookEvent.objects.create(
+            fingerprint="c" * 64,
+            event_type="OrderFullyPaid",
+            saleor_order_id="PENDING",
+            payload={},
+        )
+        WebhookEvent.objects.filter(pk__in=[old_processed.pk, old_pending.pk]).update(
+            received_at=timezone.now() - timedelta(days=400)
+        )
 
         with patch("ecommerce.services.mongo_client.carts_collection") as carts:
             carts.delete_many.return_value = MagicMock(deleted_count=3)
@@ -461,6 +478,8 @@ class RetentionTests(TestCase):
 
         self.assertTrue(ContactMessage.objects.filter(pk=fresh.pk).exists())
         self.assertFalse(ContactMessage.objects.filter(pk=stale.pk).exists())
+        self.assertFalse(WebhookEvent.objects.filter(pk=old_processed.pk).exists())
+        self.assertTrue(WebhookEvent.objects.filter(pk=old_pending.pk).exists())
         cutoff_filter = carts.delete_many.call_args.args[0]
         self.assertIn("$lt", cutoff_filter["updated_at"])
         self.assertIn("3 abandoned cart(s)", out.getvalue())
@@ -471,3 +490,21 @@ class LoadTestConfigurationTests(TestCase):
         from loadtest.config import DEFAULT_MANIFEST_PATH
 
         self.assertEqual(DEFAULT_MANIFEST_PATH, "loadtest/manifest.json")
+
+
+class CelerySecurityConfigurationTests(TestCase):
+    def test_only_json_task_messages_are_accepted(self):
+        from django.conf import settings
+
+        self.assertEqual(settings.CELERY_TASK_SERIALIZER, "json")
+        self.assertEqual(settings.CELERY_ACCEPT_CONTENT, ["json"])
+        self.assertTrue(settings.CELERY_TASK_IGNORE_RESULT)
+
+    def test_payment_and_email_tasks_use_separate_queues(self):
+        from django.conf import settings
+
+        self.assertEqual(
+            settings.CELERY_TASK_ROUTES["payments.tasks.process_webhook_event"]["queue"],
+            "webhooks",
+        )
+        self.assertEqual(settings.CELERY_TASK_ROUTES["accounts.tasks.*"]["queue"], "email")

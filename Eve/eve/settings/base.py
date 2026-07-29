@@ -132,11 +132,64 @@ PRODUCT_CACHE_TTL_SECONDS = config("PRODUCT_CACHE_TTL_SECONDS", default=3600, ca
 # --- Data retention (enforced by manage.py purge_expired_data, run daily)
 CONTACT_MESSAGE_RETENTION_DAYS = config("CONTACT_MESSAGE_RETENTION_DAYS", default=365, cast=int)
 ABANDONED_CART_RETENTION_DAYS = config("ABANDONED_CART_RETENTION_DAYS", default=365, cast=int)
+WEBHOOK_EVENT_RETENTION_DAYS = config("WEBHOOK_EVENT_RETENTION_DAYS", default=90, cast=int)
 
 # --- Cache / sessions: Redis when REDIS_URL is set, else per-process memory.
 # Production requires REDIS_URL (prod.py) so rate limits, lockouts, and
 # sessions are shared across workers.
 REDIS_URL = config("REDIS_URL", default="")
+
+# Celery uses a distinct broker URL so production can isolate queues from the
+# cache/session/rate-limit Redis instance. Development may deliberately reuse
+# REDIS_URL; production deployment should set CELERY_BROKER_URL explicitly.
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default=REDIS_URL)
+CELERY_RESULT_BACKEND = None
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TASK_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "UTC"
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 300}
+CELERY_BROKER_POOL_LIMIT = 10
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_SOFT_TIME_LIMIT = 50
+CELERY_TASK_TIME_LIMIT = 60
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_WORKER_CANCEL_LONG_RUNNING_TASKS_ON_CONNECTION_LOSS = True
+CELERY_TASK_ROUTES = {
+    "accounts.tasks.*": {"queue": "email"},
+    "payments.tasks.process_webhook_event": {"queue": "webhooks"},
+    "payments.tasks.recover_pending_webhooks": {"queue": "webhooks"},
+    "payments.tasks.reconcile_orders": {"queue": "orders"},
+    "core.tasks.purge_expired_data": {"queue": "maintenance"},
+    "core.tasks.sample_resources": {"queue": "maintenance"},
+    "ecommerce.tasks.refresh_catalogue": {"queue": "catalogue"},
+}
+CELERY_BEAT_SCHEDULE = {
+    "recover-pending-webhooks": {
+        "task": "payments.tasks.recover_pending_webhooks",
+        "schedule": 60.0,
+    },
+    "reconcile-saleor-orders": {
+        "task": "payments.tasks.reconcile_orders",
+        "schedule": 60.0 * 60.0,
+    },
+    "purge-expired-data": {
+        "task": "core.tasks.purge_expired_data",
+        "schedule": 60.0 * 60.0 * 24.0,
+    },
+    "sample-resources": {
+        "task": "core.tasks.sample_resources",
+        "schedule": 60.0,
+    },
+    "refresh-catalogue": {
+        "task": "ecommerce.tasks.refresh_catalogue",
+        "schedule": 300.0,
+    },
+}
 
 if REDIS_URL:
     from core.cache import SafeJSONSerializer
@@ -176,6 +229,7 @@ EMAIL_BACKEND = config(
     "EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend"
 )
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@localhost")
+PUBLIC_BASE_URL = config("PUBLIC_BASE_URL", default="http://localhost:8000")
 
 DATABASES = {
     "default": {

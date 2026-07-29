@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import uuid
@@ -12,7 +13,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 from ecommerce.services.cart_service import clear_cart, get_cart
 
-from .models import Order
+from .models import Order, WebhookEvent
 from .services.saleor_checkout import CheckoutError, complete_checkout, create_checkout
 from .services.saleor_webhooks import WebhookSignatureError, verify_saleor_signature
 
@@ -116,38 +117,32 @@ def saleor_webhook_view(request):
         logger.warning("Saleor webhook rejected: malformed payload")
         return HttpResponse(status=400)
 
-    event_to_status = {
-        "OrderFullyPaid": Order.Status.PAID,
-        "OrderRefunded": Order.Status.REFUNDED,
-        "OrderFullyRefunded": Order.Status.REFUNDED,
-        "OrderCancelled": Order.Status.CANCELLED,
-    }
-    new_status = event_to_status.get(event_type)
-    if new_status is None:
-        logger.info("Saleor webhook: ignoring event %s", event_type)
-        return JsonResponse({"handled": False})
+    # Store only the fields Eve needs; a Saleor subscription may later grow
+    # to include customer data that must not be retained in the inbox.
+    safe_payload = {"__typename": event_type, "order": {"id": order_id}}
+    event, created = WebhookEvent.objects.get_or_create(
+        fingerprint=hashlib.sha256(request.body).hexdigest(),
+        defaults={
+            "event_type": event_type,
+            "saleor_order_id": order_id,
+            "payload": safe_payload,
+        },
+    )
 
-    with transaction.atomic():
-        order = Order.objects.select_for_update().filter(saleor_order_id=order_id).first()
-        if order is None:
-            # Unknown order: acknowledge so Saleor stops retrying, but log it
-            logger.warning("Saleor webhook for unknown order %s", order_id)
-            return JsonResponse({"handled": False})
+    if created:
+        from .tasks import process_webhook_event
 
-        if order.status == new_status:
-            return JsonResponse({"handled": True})  # idempotent re-delivery
+        def enqueue():
+            try:
+                process_webhook_event.delay(event.pk)
+            except Exception:
+                # The PostgreSQL inbox is already durable. Beat recovery will
+                # republish this event when the broker is available again.
+                logger.exception("Webhook durable but queue publication failed")
 
-        if not order.can_transition_to(new_status):
-            logger.error(
-                "Saleor webhook refused transition %s -> %s for order %s",
-                order.status, new_status, order_id,
-            )
-            return JsonResponse({"handled": False}, status=409)
+        transaction.on_commit(enqueue)
 
-        order.status = new_status
-        order.save(update_fields=["status", "updated_at"])
-    logger.info("Order %s -> %s via webhook", order_id, new_status)
-    return JsonResponse({"handled": True})
+    return JsonResponse({"accepted": True, "duplicate": not created}, status=202)
 
 
 @login_required

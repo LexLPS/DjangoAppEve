@@ -53,6 +53,9 @@ if not SALEOR_GRAPHQL_URL.startswith("https://"):
 REDIS_URL = config("REDIS_URL")
 if not REDIS_URL.startswith(("redis://", "rediss://")):
     raise ImproperlyConfigured("REDIS_URL must be a redis:// or rediss:// URL.")
+CELERY_BROKER_URL = config("CELERY_BROKER_URL")
+if not CELERY_BROKER_URL.startswith(("redis://", "rediss://")):
+    raise ImproperlyConfigured("CELERY_BROKER_URL must be a redis:// or rediss:// URL.")
 from core.cache import SafeJSONSerializer  # noqa: E402
 
 CACHES = {
@@ -91,6 +94,9 @@ EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
+PUBLIC_BASE_URL = config("PUBLIC_BASE_URL")
+if not PUBLIC_BASE_URL.startswith("https://"):
+    raise ImproperlyConfigured("PUBLIC_BASE_URL must be an https:// URL in production.")
 
 # TLS terminates at the reverse proxy; trust its X-Forwarded-Proto so
 # request.is_secure() is correct. Only safe because the proxy overwrites

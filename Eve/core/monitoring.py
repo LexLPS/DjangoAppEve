@@ -13,6 +13,7 @@ import logging
 
 from django.conf import settings
 from django.db import connection
+from django.utils import timezone
 from pymongo import monitoring
 
 logger = logging.getLogger("eve.resources")
@@ -104,11 +105,44 @@ def _mongo_stats():
         return {"mongo_error": type(exc).__name__}
 
 
+def _celery_stats():
+    """Broker queue depth and durable webhook backlog age."""
+    stats = {}
+    try:
+        from redis import Redis
+
+        broker = Redis.from_url(
+            settings.CELERY_BROKER_URL,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
+        for queue in (
+            "webhooks", "orders", "email", "catalogue", "maintenance", "celery"
+        ):
+            stats[f"queue_{queue}_depth"] = broker.llen(queue)
+    except Exception as exc:
+        stats["celery_broker_error"] = type(exc).__name__
+
+    try:
+        from payments.models import WebhookEvent
+
+        pending = WebhookEvent.objects.filter(status=WebhookEvent.Status.PENDING)
+        oldest = pending.order_by("received_at").values_list("received_at", flat=True).first()
+        stats["webhook_pending"] = pending.count()
+        stats["webhook_oldest_seconds"] = (
+            round((timezone.now() - oldest).total_seconds(), 1) if oldest else 0
+        )
+    except Exception as exc:
+        stats["webhook_backlog_error"] = type(exc).__name__
+    return stats
+
+
 def snapshot_resources() -> dict:
     stats = {}
     stats.update(_postgres_stats())
     stats.update(_redis_stats())
     stats.update(_mongo_stats())
+    stats.update(_celery_stats())
     return stats
 
 

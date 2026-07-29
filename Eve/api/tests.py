@@ -440,6 +440,9 @@ class OpenAPISchemaTests(TestCase):
         self.assertEqual(self.client.get("/api/v1/redoc/").status_code, 200)
 
     def test_site_wide_csp_is_not_weakened_by_the_docs_exception(self):
-        response = self.client.get("/api/v1/products/")
+        # This assertion covers response security headers, not catalogue I/O.
+        # Keep it independent of a live MongoDB service in CI.
+        with patch("api.v1.views.list_products", return_value=([], False)):
+            response = self.client.get("/api/v1/products/")
         self.assertIn("style-src 'self'", response["Content-Security-Policy"])
         self.assertNotIn("unsafe-inline", response["Content-Security-Policy"])

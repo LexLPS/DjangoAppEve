@@ -7,9 +7,28 @@ GraphQL response shape does.
 """
 from accounts.models import Profile
 from django.contrib.auth.models import User
+from drf_spectacular.utils import extend_schema_field
 from ecommerce.services.cart_service import MAX_REQUEST_QUANTITY
 from payments.models import Order
 from rest_framework import serializers
+
+
+class MoneySerializer(serializers.Serializer):
+    amount = serializers.FloatField()
+    currency = serializers.CharField()
+
+
+class ErrorBodySerializer(serializers.Serializer):
+    code = serializers.CharField(help_text="Stable machine-readable error code.")
+    message = serializers.CharField(help_text="Human-readable, safe to display.")
+    details = serializers.DictField(required=False)
+    request_id = serializers.CharField(help_text="Matches the X-Request-ID header.")
+
+
+class ErrorSerializer(serializers.Serializer):
+    """The envelope returned by every failing request."""
+
+    error = ErrorBodySerializer()
 
 
 def _price(product):
@@ -25,6 +44,16 @@ def _price(product):
 class ProductSerializer(serializers.Serializer):
     """Read-only projection of an upstream product document."""
 
+    id = serializers.CharField(read_only=True)
+    slug = serializers.SlugField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    description = serializers.CharField(read_only=True)
+    thumbnail_url = serializers.URLField(read_only=True, allow_null=True)
+    price = MoneySerializer(read_only=True, allow_null=True)
+    purchasable = serializers.BooleanField(
+        read_only=True, help_text="False when the product has no buyable variant."
+    )
+
     def to_representation(self, product):
         return {
             "id": product.get("id"),
@@ -38,6 +67,14 @@ class ProductSerializer(serializers.Serializer):
 
 
 class CartItemSerializer(serializers.Serializer):
+    product_id = serializers.CharField(read_only=True)
+    slug = serializers.SlugField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    thumbnail_url = serializers.URLField(read_only=True, allow_null=True)
+    quantity = serializers.IntegerField(read_only=True)
+    unit_price = MoneySerializer(read_only=True)
+    line_total = serializers.FloatField(read_only=True)
+
     def to_representation(self, item):
         try:
             quantity = int(item.get("quantity") or 0)
@@ -63,6 +100,13 @@ class CartItemSerializer(serializers.Serializer):
 
 class CartSerializer(serializers.Serializer):
     """Totals are indicative only — Saleor recalculates them at checkout."""
+
+    items = CartItemSerializer(many=True, read_only=True)
+    item_count = serializers.IntegerField(read_only=True)
+    estimated_total = MoneySerializer(
+        read_only=True, help_text="Indicative only; Saleor recalculates at checkout."
+    )
+    updated_at = serializers.DateTimeField(read_only=True, allow_null=True)
 
     def to_representation(self, cart):
         items = [CartItemSerializer().to_representation(i) for i in cart.get("items") or []]
@@ -90,6 +134,13 @@ class UpdateCartItemSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, max_value=MAX_REQUEST_QUANTITY)
 
 
+class OrderTotalSerializer(serializers.Serializer):
+    """Money as an exact decimal string — never a float, for billing values."""
+
+    amount = serializers.CharField()
+    currency = serializers.CharField()
+
+
 class OrderSerializer(serializers.ModelSerializer):
     total = serializers.SerializerMethodField()
 
@@ -98,6 +149,7 @@ class OrderSerializer(serializers.ModelSerializer):
         fields = ["id", "saleor_order_id", "status", "total", "created_at", "updated_at"]
         read_only_fields = fields
 
+    @extend_schema_field(OrderTotalSerializer)
     def get_total(self, order):
         return {"amount": str(order.total_amount), "currency": order.currency}
 
@@ -118,3 +170,22 @@ class ProfileSerializer(serializers.ModelSerializer):
         # health-adjacent and are deliberately never exposed over the API.
         fields = ["user", "email_verified", "is_long_term_patient", "preferred_vr_mode"]
         read_only_fields = fields
+
+
+class ProductListResponseSerializer(serializers.Serializer):
+    """Envelope for the catalogue listing."""
+
+    count = serializers.IntegerField()
+    degraded = serializers.BooleanField(
+        help_text="True when stale cached data is served during an upstream outage."
+    )
+    results = ProductSerializer(many=True)
+
+
+class TokenRequestSerializer(serializers.Serializer):
+    username = serializers.CharField()
+    password = serializers.CharField(style={"input_type": "password"})
+
+
+class TokenResponseSerializer(serializers.Serializer):
+    token = serializers.CharField()

@@ -16,6 +16,16 @@ colorama==0.4.6
 Django==5.2.16
 django-otp==1.7.0
 djangorestframework==3.16.1
+drf-spectacular==0.30.0
+drf-spectacular-sidecar==2026.7.1
+attrs==26.1.0
+inflection==0.5.1
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+PyYAML==6.0.3
+referencing==0.37.0
+rpds-py==2026.6.3
+uritemplate==4.2.0
 dnspython==2.8.0
 gunicorn==26.0.0
 idna==3.15

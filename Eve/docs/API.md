@@ -2,6 +2,27 @@
 
 Base URL: `/api/v1/`
 
+## Interactive documentation
+
+| URL | What |
+|---|---|
+| `/api/v1/schema/` | OpenAPI 3.0 document (JSON or YAML via `Accept`) |
+| `/api/v1/docs/` | Swagger UI — browse and try endpoints |
+| `/api/v1/redoc/` | ReDoc — reference-style reading view |
+
+The schema is generated from the code (drf-spectacular), so it cannot drift
+from the implementation, and a test fails the build if generation produces
+any warning or error. Client SDKs can be generated straight from it:
+
+```bash
+curl -s https://<host>/api/v1/schema/ -o eve-openapi.yaml
+npx @openapitools/openapi-generator-cli generate -i eve-openapi.yaml -g typescript-fetch -o ./client
+```
+
+Both UIs run under the site's strict Content-Security-Policy: assets are
+served locally (no CDN) and Swagger UI's init script is delivered as its own
+request rather than inline, so `script-src 'self'` is never relaxed.
+
 The API is a first-class client of the same service layer the server-rendered
 storefront uses (`ecommerce.services.catalogue`,
 `ecommerce.services.cart_service`, `payments.services.checkout`). Business

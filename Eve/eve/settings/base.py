@@ -53,6 +53,8 @@ INSTALLED_APPS = [
     # Third-party
     "rest_framework",
     "rest_framework.authtoken",
+    "drf_spectacular",
+    "drf_spectacular_sidecar",  # serves Swagger UI assets locally (CSP)
     "django_otp",
     "django_otp.plugins.otp_totp",
     "django_otp.plugins.otp_static",
@@ -302,6 +304,7 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
     ],
     "EXCEPTION_HANDLER": "api.errors.exception_handler",
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
@@ -326,6 +329,35 @@ REST_FRAMEWORK = {
 # (prod default); "console" keeps human-readable output (dev default).
 LOG_FORMAT = config("LOG_FORMAT", default="console")
 LOG_LEVEL = config("LOG_LEVEL", default="INFO")
+
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Eve API",
+    "DESCRIPTION": (
+        "REST API for the Eve VR-experience store: catalogue, cart, "
+        "idempotent checkout, and order history.\n\n"
+        "Authenticate with a session cookie (browser) or "
+        "`Authorization: Token <key>` (mobile / server-to-server). Errors "
+        "always use the envelope `{\"error\": {code, message, details, "
+        "request_id}}`; branch on `code` and quote `request_id` in reports."
+    ),
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,  # don't document the schema endpoint itself
+    "PREPROCESSING_HOOKS": ["api.schema_hooks.only_v1_endpoints"],
+    "COMPONENT_SPLIT_REQUEST": True,
+    "SCHEMA_PATH_PREFIX": "/api/v1",
+    "TAGS": [
+        {"name": "products", "description": "Public catalogue."},
+        {"name": "cart", "description": "The signed-in user's cart."},
+        {"name": "checkout", "description": "Idempotent order placement."},
+        {"name": "orders", "description": "Order history (own orders only)."},
+        {"name": "account", "description": "Profile and token exchange."},
+    ],
+    # Assets from the sidecar package, not a CDN — the CSP forbids
+    # third-party script/style origins.
+    "SWAGGER_UI_DIST": "SIDECAR",
+    "SWAGGER_UI_FAVICON_HREF": "SIDECAR",
+    "REDOC_DIST": "SIDECAR",
+}
 
 LOGGING = {
     "version": 1,

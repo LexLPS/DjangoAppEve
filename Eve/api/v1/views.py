@@ -9,6 +9,7 @@ import logging
 from accounts.models import Profile
 from core.cache_lock import CacheLeaseUnavailable
 from django.conf import settings
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from ecommerce.services import cart_service
 from ecommerce.services.catalogue import (
     ProductNotFound,
@@ -31,7 +32,9 @@ from api.errors import APIError
 from .serializers import (
     AddCartItemSerializer,
     CartSerializer,
+    ErrorSerializer,
     OrderSerializer,
+    ProductListResponseSerializer,
     ProductSerializer,
     ProfileSerializer,
     UpdateCartItemSerializer,
@@ -41,7 +44,32 @@ logger = logging.getLogger(__name__)
 
 MAX_IDEMPOTENCY_KEY_LENGTH = 64
 
+# Reused in the OpenAPI schema so every documented failure shows the envelope
+ERROR = ErrorSerializer
+IDEMPOTENCY_KEY_PARAM = OpenApiParameter(
+    name="Idempotency-Key",
+    type=str,
+    location=OpenApiParameter.HEADER,
+    required=True,
+    description=(
+        "Client-generated key (e.g. a UUID, max 64 chars). Retrying with the "
+        "same key returns the original order instead of placing a second one."
+    ),
+)
 
+
+@extend_schema_view(
+    list=extend_schema(
+        tags=["products"],
+        summary="List products",
+        responses={200: ProductListResponseSerializer, 503: ERROR},
+    ),
+    retrieve=extend_schema(
+        tags=["products"],
+        summary="Retrieve a product by slug",
+        responses={200: ProductSerializer, 404: ERROR, 503: ERROR},
+    ),
+)
 class ProductViewSet(viewsets.ViewSet):
     """Public catalogue. Reads go through the cache-first service, so API
     traffic benefits from the same TTL cache, single-flight refresh, and
@@ -83,24 +111,34 @@ class ProductViewSet(viewsets.ViewSet):
         return Response(ProductSerializer(product).data)
 
 
+@extend_schema(tags=["cart"])
 class CartView(APIView):
     """The signed-in user's cart. Always keyed by the session/token user —
     a client can never address another user's cart."""
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(summary="Get the current cart",
+                   responses={200: CartSerializer, 401: ERROR})
     def get(self, request):
         cart = cart_service.get_cart(request.user.id)
         return Response(CartSerializer(cart).data)
 
+    @extend_schema(summary="Empty the cart", responses={204: None, 401: ERROR})
     def delete(self, request):
         cart_service.clear_cart(request.user.id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@extend_schema(tags=["cart"])
 class CartItemsView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary="Add an item to the cart",
+        request=AddCartItemSerializer,
+        responses={201: CartSerializer, 400: ERROR, 401: ERROR, 404: ERROR, 503: ERROR},
+    )
     def post(self, request):
         payload = AddCartItemSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
@@ -126,9 +164,15 @@ class CartItemsView(APIView):
         return Response(CartSerializer(cart).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(tags=["cart"])
 class CartItemDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        summary="Set an item's quantity",
+        request=UpdateCartItemSerializer,
+        responses={200: CartSerializer, 400: ERROR, 401: ERROR, 404: ERROR},
+    )
     def patch(self, request, product_id):
         payload = UpdateCartItemSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
@@ -142,6 +186,8 @@ class CartItemDetailView(APIView):
             )
         return Response(CartSerializer(cart_service.get_cart(request.user.id)).data)
 
+    @extend_schema(summary="Remove an item",
+                   responses={204: None, 401: ERROR})
     def delete(self, request, product_id):
         cart_service.remove_from_cart(request.user.id, product_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -159,6 +205,25 @@ class CheckoutView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "checkout"
 
+    @extend_schema(
+        tags=["checkout"],
+        summary="Place an order",
+        description=(
+            "Creates an order from the current cart. Prices are recalculated "
+            "by Saleor; cart amounts are never trusted for billing.\n\n"
+            "* `201` — order created.\n"
+            "* `200` — this Idempotency-Key was already used: the original "
+            "order is returned and nothing is charged again.\n"
+            "* `409 checkout_in_progress` — a request with this key is "
+            "in flight. Do not retry; poll `/orders/`."
+        ),
+        parameters=[IDEMPOTENCY_KEY_PARAM],
+        request=None,
+        responses={
+            201: OrderSerializer, 200: OrderSerializer, 400: ERROR,
+            401: ERROR, 403: ERROR, 409: ERROR, 429: ERROR, 503: ERROR,
+        },
+    )
     def post(self, request):
         if not settings.CHECKOUT_ENABLED:
             raise APIError(
@@ -221,6 +286,12 @@ class CheckoutView(APIView):
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
+@extend_schema_view(
+    list=extend_schema(tags=["orders"], summary="List your orders",
+                       responses={200: OrderSerializer(many=True), 401: ERROR}),
+    retrieve=extend_schema(tags=["orders"], summary="Retrieve one of your orders",
+                           responses={200: OrderSerializer, 401: ERROR, 404: ERROR}),
+)
 class OrderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """Order history, scoped to the requesting user by the queryset itself."""
 
@@ -236,11 +307,21 @@ class OrderViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, viewsets.Ge
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        tags=["account"],
+        summary="Get your profile",
+        description=(
+            "Health-adjacent fields (hospital, room) are deliberately not "
+            "exposed through the API — data minimisation."
+        ),
+        responses={200: ProfileSerializer, 401: ERROR},
+    )
     def get(self, request):
         profile, _ = Profile.objects.get_or_create(user=request.user)
         return Response(ProfileSerializer(profile).data)
 
 
+@extend_schema(exclude=True)  # catch-all: not part of the documented surface
 @api_view(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
 @permission_classes([AllowAny])
 def not_found_view(request, *args, **kwargs):

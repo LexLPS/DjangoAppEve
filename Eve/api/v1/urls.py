@@ -7,6 +7,7 @@ from django.urls import include, path, re_path
 from rest_framework.authtoken import views as authtoken_views
 from rest_framework.routers import DefaultRouter
 
+from .docs import RedocView, SchemaView, SwaggerView
 from .views import (
     CartItemDetailView,
     CartItemsView,
@@ -25,6 +26,11 @@ router.register(r"products", ProductViewSet, basename="product")
 router.register(r"orders", OrderViewSet, basename="order")
 
 urlpatterns = [
+    # OpenAPI schema + human documentation. Registered before the catch-all.
+    path("schema/", SchemaView.as_view(), name="schema"),
+    path("docs/", SwaggerView.as_view(url_name="v1:schema"), name="swagger-ui"),
+    path("redoc/", RedocView.as_view(url_name="v1:schema"), name="redoc"),
+
     # Token exchange for non-browser clients (mobile, server-to-server).
     # Browsers keep using session auth + CSRF.
     path("auth/token/", authtoken_views.obtain_auth_token, name="obtain-token"),

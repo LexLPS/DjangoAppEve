@@ -2,6 +2,8 @@
 # install with: pip install -r requirements.lock
 Django==5.2.16
 djangorestframework==3.16.1
+drf-spectacular==0.30.0
+drf-spectacular-sidecar==2026.7.1
 django-otp==1.7.0
 psycopg2-binary==2.9.11
 pymongo==4.15.4

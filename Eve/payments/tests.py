@@ -171,13 +171,13 @@ class CheckoutFlowTests(TestCase):
         create_mock.assert_not_called()
 
     def test_held_checkout_lease_prevents_saleor_mutations(self):
-        self.client.get(reverse("checkout"))
         lease = patch("payments.views.cache_lease")
         with (
             lease as mocked_lease,
             patch("payments.views.get_cart", return_value=self.cart),
             patch("payments.views.create_checkout") as create_mock,
         ):
+            self.client.get(reverse("checkout"))
             mocked_lease.return_value.__enter__.return_value = False
             response = self.client.post(reverse("checkout"))
 

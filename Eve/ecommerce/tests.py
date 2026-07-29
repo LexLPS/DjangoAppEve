@@ -58,6 +58,10 @@ class UpstreamErrorTests(TestCase):
         with (
             patch("ecommerce.views.get_cached_products", return_value=[]),
             patch("ecommerce.views.fetch_products_from_saleor", side_effect=error),
+            patch(
+                "ecommerce.views.get_stale_cached_products",
+                side_effect=ConnectionError("mongo unavailable"),
+            ),
             patch("ecommerce.views.cache_product"),
         ):
             response = self.client.get(reverse("product_catalogue"))
@@ -106,11 +110,13 @@ class CacheStampedeTests(TestCase):
             patch("ecommerce.views.wait_for_value", return_value=None),
             patch("ecommerce.views.get_stale_cached_product", return_value=make_product()),
             patch("ecommerce.views.fetch_product_by_slug") as fetch,
+            patch("ecommerce.views.cache_product") as cache_write,
         ):
             response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
 
         self.assertEqual(response.status_code, 200)
         fetch.assert_not_called()
+        cache_write.assert_not_called()
 
 
 class NegativeCacheTests(TestCase):

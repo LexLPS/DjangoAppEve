@@ -122,6 +122,7 @@ Health endpoints:
 - [Implemented cybersecurity measures](Eve/docs/SECURITY_MEASURES.md)
 - [Security operations](Eve/docs/SECURITY_OPERATIONS.md)
 - [Observability and alerts](Eve/docs/OBSERVABILITY.md)
+- [Capacity analysis and load-test evidence](Eve/docs/CAPACITY.md)
 - [Background jobs and Celery operations](Eve/docs/BACKGROUND_JOBS.md)
 - [Release process](Eve/docs/RELEASE.md)
 - [Threat model](Eve/docs/THREAT_MODEL.md)

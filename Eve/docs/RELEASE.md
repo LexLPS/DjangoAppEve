@@ -64,6 +64,10 @@ failure exercises, and rollback procedure are in
    pool, worker saturation). Require `python -m loadtest.evaluate` to pass and
    archive the Locust CSV, resource JSONL, evaluator report, app commit, and
    service sizes with the sign-off.
+   If the target instance cannot meet the SLOs, record the measured
+   ceiling and the capacity required instead of lowering the budgets:
+   docs/CAPACITY.md holds the method, the measured per-request service
+   costs, and the projection.
 2. **Final security review:** re-run the full CI security gates; verify the
    go-live checklist — checkout enablement runbook completed (integration
    tests green against production Saleor, RS256 webhook round-trip verified), admin MFA

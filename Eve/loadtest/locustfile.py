@@ -38,7 +38,8 @@ SLO_BUDGETS_MS = {
     "GET /shop/product/[hit]":          (200, P95_BUDGETS_MS["GET /shop/product/[hit]"], 1000),
     # A miss is allowed one upstream Saleor call
     "GET /shop/product/[miss]":         (400, P95_BUDGETS_MS["GET /shop/product/[miss]"], 1500),
-    # Login is dominated by PBKDF2 password hashing (deliberately slow)
+    # Login includes memory-hard Argon2id password verification. Monitor RAM
+    # during ramp-up because concurrent hashes multiply its memory cost.
     "POST /accounts/login/":            (600, P95_BUDGETS_MS["POST /accounts/login/"], 1500),
     "POST /shop/cart/add/":             (200, P95_BUDGETS_MS["POST /shop/cart/add/"], 1000),
     "GET /shop/cart/":                  (200, P95_BUDGETS_MS["GET /shop/cart/"], 1000),
@@ -125,13 +126,23 @@ class ShopperUser(HttpUser):
                   "csrfmiddlewaretoken": token},
             headers={"Referer": self.client.base_url},
             name="POST /accounts/login/", catch_response=True,
+            allow_redirects=False,
         ) as response:
             if response.status_code == 429:
                 # Rate limited: raise RATE_LIMIT_SCALE on staging
                 response.failure("throttled (raise RATE_LIMIT_SCALE)")
                 return False
+            # A rejected Django form returns HTTP 200, so response.ok is not
+            # evidence of authentication. A successful login redirects and
+            # establishes the configured session cookie.
+            if response.status_code not in (302, 303):
+                response.failure(f"login rejected ({response.status_code})")
+                return False
+            if not self.client.cookies.get("sessionid"):
+                response.failure("login did not establish a session")
+                return False
             response.success()
-            return "_auth_user_id" in str(self.client.cookies) or response.ok
+            return True
 
     @tag("cart")
     @task(5)
@@ -194,7 +205,10 @@ class WebhookBurstUser(HttpUser):
     """Saleor delivering signed order events, in bursts rather than evenly -
     verification (JWKS + RSA) and the row-locked update are the hot path."""
 
-    weight = 1
+    # A manifest without a signing key deliberately omits webhook traffic.
+    # A zero weight prevents Locust from repeatedly spawning and stopping
+    # replacement users for a stage that cannot run.
+    weight = 1 if SIGNER is not None else 0
     wait_time = between(5, 10)
     BURST_SIZE = 10
 

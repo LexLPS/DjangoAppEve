@@ -114,6 +114,38 @@ It is now the preferred hasher; existing PBKDF2 hashes keep verifying and
 upgrade in place on each owner's next login. Budget memory accordingly:
 Argon2 is memory-hard at ~100 MiB per concurrent hash.
 
+The local concurrency probe confirmed the expected memory scaling with the
+production hasher configuration:
+
+| Concurrent hashes | Elapsed | Peak process memory | Increase over baseline |
+|---:|---:|---:|---:|
+| 1 | 85 ms | 164 MiB | 101 MiB |
+| 2 | 128 ms | 265 MiB | 200 MiB |
+| 4 | 261 ms | 465 MiB | 401 MiB |
+| 8 | 577 ms | 866 MiB | 802 MiB |
+
+The configured 2 workers x 4 threads therefore cap password-hashing demand
+at roughly 800 MiB per replica. This fits the current 8 GB Railway service
+limit with ample room for the application. Keep Django's Argon2id defaults;
+do not reduce the memory cost unless measurements on the actual production
+instance demonstrate memory pressure. Alert on memory during login bursts
+and reconsider thread count before changing the security parameters.
+
+### Staging Argon2id remeasurement
+
+The 20-user staging run after deploying Argon2id completed 790 requests at
+6.66 req/s with zero HTTP failures. In-app timing was 148 ms p50 and 1,268 ms
+p95; client timing was 175 ms p50 and 1,301 ms p95; queue plus public-network
+overhead was 30 ms p50 and 647 ms p95.
+
+A separate login probe confirmed a real redirect and session cookie, but took
+3,174 ms in the application: 999 ms in PostgreSQL and about 2,175 ms in
+password hashing and other application work. This differs sharply from the
+76 ms local Argon2id benchmark and indicates CPU/database contention on the
+current shared staging allocation. Argon2id is working correctly; do not
+weaken its parameters to compensate. Increase guaranteed CPU capacity and
+co-locate PostgreSQL before repeating the warm-up.
+
 ## Projection to the go-live target (200 users)
 
 Scaling the measured profile ×10:

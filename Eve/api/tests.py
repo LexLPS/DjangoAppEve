@@ -210,8 +210,12 @@ class CheckoutEndpointTests(ApiTestCase):
         self.client.force_login(self.user)
 
     def _order(self, key="key-1"):
+        from payments.services.checkout import scoped_idempotency_key
+
+        # Stored scoped to the user, exactly as place_order_once writes it
         return Order.objects.create(
-            user=self.user, saleor_order_id="ORD-API-1", idempotency_key=key,
+            user=self.user, saleor_order_id="ORD-API-1",
+            idempotency_key=scoped_idempotency_key(self.user, key),
             total_amount="99.98", currency="EUR", status=Order.Status.PENDING,
         )
 
@@ -446,3 +450,96 @@ class OpenAPISchemaTests(TestCase):
             response = self.client.get("/api/v1/products/")
         self.assertIn("style-src 'self'", response["Content-Security-Policy"])
         self.assertNotIn("unsafe-inline", response["Content-Security-Policy"])
+
+
+@override_settings(CHECKOUT_ENABLED=True)
+class IdempotencyKeyScopingTests(ApiTestCase):
+    """API clients choose their own Idempotency-Key. Two accounts picking the
+    same string must never see each other's orders or block each other."""
+
+    def setUp(self):
+        super().setUp()
+        self.mallory = User.objects.create_user(
+            "mallory", "mallory@example.com", "S3curePass!x"
+        )
+        Profile.objects.create(user=self.mallory, email_verified=True)
+
+    def _alice_places_order(self, key="shared-key-1"):
+        from payments.services.checkout import scoped_idempotency_key
+
+        return Order.objects.create(
+            user=self.user, saleor_order_id="ORD-ALICE",
+            idempotency_key=scoped_idempotency_key(self.user, key),
+            total_amount="99.98", currency="EUR", status=Order.Status.PENDING,
+        )
+
+    def test_reused_key_does_not_disclose_another_users_order(self):
+        alice_order = self._alice_places_order()
+        self.client.force_login(self.mallory)
+
+        with (
+            patch("api.v1.views.cart_service.get_cart",
+                  return_value=make_cart(self.mallory.id)),
+            patch("api.v1.views.cart_service.clear_cart"),
+            patch("api.v1.views.place_order_once", return_value=None) as place,
+        ):
+            response = self.client.post(
+                "/api/v1/checkout/", **{"HTTP_IDEMPOTENCY_KEY": "shared-key-1"}
+            )
+        # Mallory must not receive Alice's order under any status code
+        body = response.content.decode()
+        self.assertNotIn("ORD-ALICE", body)
+        self.assertNotIn(str(alice_order.id), body.split("request_id")[0])
+        place.assert_called_once()  # not short-circuited by Alice's record
+
+    def test_same_key_still_replays_for_its_owner(self):
+        alice_order = self._alice_places_order(key="replay-key")
+        self.client.force_login(self.user)
+        with patch("api.v1.views.place_order_once") as place:
+            response = self.client.post(
+                "/api/v1/checkout/", **{"HTTP_IDEMPOTENCY_KEY": "replay-key"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["saleor_order_id"], alice_order.saleor_order_id)
+        place.assert_not_called()
+
+    def test_one_account_cannot_block_anothers_checkout_with_a_guessed_key(self):
+        from payments.models import CheckoutAttempt
+        from payments.services.checkout import scoped_idempotency_key
+
+        # Mallory pre-registers an in-flight attempt under a guessable key
+        CheckoutAttempt.objects.create(
+            user=self.mallory,
+            idempotency_key=scoped_idempotency_key(self.mallory, "guessable"),
+            cart_fingerprint="x",
+            state=CheckoutAttempt.State.COMPLETING,
+        )
+        # Alice uses the same string and must be unaffected
+        self.client.force_login(self.user)
+        with (
+            patch("api.v1.views.cart_service.get_cart", return_value=make_cart(self.user.id)),
+            patch("api.v1.views.cart_service.clear_cart"),
+            patch("api.v1.views.place_order_once") as place,
+        ):
+            # Created when the view calls the service, not before it
+            place.side_effect = lambda **kwargs: Order.objects.create(
+                user=self.user, saleor_order_id="ORD-ALICE-OK",
+                idempotency_key=scoped_idempotency_key(self.user, "guessable"),
+                total_amount="10.00", currency="EUR", status=Order.Status.PENDING,
+            )
+            response = self.client.post(
+                "/api/v1/checkout/", **{"HTTP_IDEMPOTENCY_KEY": "guessable"}
+            )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["saleor_order_id"], "ORD-ALICE-OK")
+
+    def test_scoping_is_per_user_and_deterministic(self):
+        from payments.services.checkout import scoped_idempotency_key
+
+        self.assertEqual(
+            scoped_idempotency_key(self.user, "k"), scoped_idempotency_key(self.user, "k")
+        )
+        self.assertNotEqual(
+            scoped_idempotency_key(self.user, "k"),
+            scoped_idempotency_key(self.mallory, "k"),
+        )

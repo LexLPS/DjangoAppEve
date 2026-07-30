@@ -18,7 +18,7 @@ from ecommerce.services.catalogue import (
     list_products,
 )
 from payments.models import Order
-from payments.services.checkout import place_order_once
+from payments.services.checkout import place_order_once, scoped_idempotency_key
 from payments.services.saleor_checkout import CheckoutError
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import api_view, permission_classes
@@ -137,7 +137,10 @@ class CartItemsView(APIView):
     @extend_schema(
         summary="Add an item to the cart",
         request=AddCartItemSerializer,
-        responses={201: CartSerializer, 400: ERROR, 401: ERROR, 404: ERROR, 503: ERROR},
+        responses={
+            201: CartSerializer, 400: ERROR, 401: ERROR, 404: ERROR,
+            409: ERROR, 503: ERROR,
+        },
     )
     def post(self, request):
         payload = AddCartItemSerializer(data=request.data)
@@ -157,9 +160,17 @@ class CartItemsView(APIView):
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             ) from None
 
-        cart_service.add_to_cart(
-            request.user.id, product, payload.validated_data["quantity"]
-        )
+        try:
+            cart_service.add_to_cart(
+                request.user.id, product, payload.validated_data["quantity"]
+            )
+        except cart_service.CartFullError as exc:
+            raise APIError(
+                "cart_full",
+                f"A cart may hold at most {exc.args[0]} different products. "
+                "Remove an item before adding another.",
+                status_code=status.HTTP_409_CONFLICT,
+            ) from None
         cart = cart_service.get_cart(request.user.id)
         return Response(CartSerializer(cart).data, status=status.HTTP_201_CREATED)
 
@@ -250,7 +261,10 @@ class CheckoutView(APIView):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        existing = Order.objects.filter(idempotency_key=key, user=request.user).first()
+        existing = Order.objects.filter(
+            idempotency_key=scoped_idempotency_key(request.user, key),
+            user=request.user,
+        ).first()
         if existing:
             # Idempotent replay: same key, same answer, no second charge
             return Response(OrderSerializer(existing).data, status=status.HTTP_200_OK)

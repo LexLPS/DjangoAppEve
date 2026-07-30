@@ -17,6 +17,15 @@ from .mongo_client import carts_collection
 MAX_ITEM_QUANTITY = 99
 # Ceiling accepted from a single client request (HTML form and API alike)
 MAX_REQUEST_QUANTITY = 20
+# Ceiling on distinct line items. Without it an authenticated client can add
+# unlimited products until the cart document approaches MongoDB's 16 MB
+# limit, at which point every write fails and the cart is permanently
+# broken - a self-inflicted denial of service and a storage-abuse vector.
+MAX_CART_ITEMS = 50
+
+
+class CartFullError(Exception):
+    """The cart already holds MAX_CART_ITEMS distinct products."""
 
 
 def _now():
@@ -94,8 +103,14 @@ def add_to_cart(user_id: int, product: dict, quantity: int = 1):
         }
 
         def push_item():
+            # The $expr guard refuses the push atomically once the cart is
+            # full, so a concurrent burst cannot race past the limit.
             return carts_collection.update_one(
-                {"user_id": user_id, "items.product_id": {"$ne": product["id"]}},
+                {
+                    "user_id": user_id,
+                    "items.product_id": {"$ne": product["id"]},
+                    "$expr": {"$lt": [{"$size": "$items"}, MAX_CART_ITEMS]},
+                },
                 {
                     "$push": {"items": line_item},
                     "$set": {"updated_at": _now()},
@@ -103,10 +118,18 @@ def add_to_cart(user_id: int, product: dict, quantity: int = 1):
             )
 
         if push_item().matched_count == 0:
-            # No cart document yet (first ever add for this user): create it
-            # and retry once. Only this cold path pays a third round-trip.
-            get_cart(user_id)
-            push_item()
+            # Either there is no cart document yet, the cart is full, or a
+            # concurrent request pushed the same product first. One read
+            # tells them apart; only this uncommon path pays for it.
+            existing = carts_collection.find_one(
+                {"user_id": user_id}, {"items.product_id": 1}
+            )
+            if existing is None:
+                get_cart(user_id)  # first ever add: create, then retry
+                push_item()
+            elif len(existing.get("items") or []) >= MAX_CART_ITEMS:
+                raise CartFullError(MAX_CART_ITEMS)
+            # else: a concurrent request added it - nothing left to do
     else:
         # Clamp runaway quantities (atomic; the array filter targets the
         # item). Only needed after an increment: a freshly pushed line item

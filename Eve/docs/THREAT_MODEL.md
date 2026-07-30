@@ -128,6 +128,66 @@ runtime. Residual: base image not digest-pinned, no container scan (R8).
 | R9 | Email verification is recorded but nothing requires it. | Low | Gate checkout (when enabled) and contact-visible features on `email_verified`. |
 | R10 | Registration allows multiple accounts per email address. | Low | Enforce case-insensitive unique email at the form + a DB constraint; mind the enumeration tradeoff (return a neutral error). |
 
+## 6b. E-commerce specific review (2026-07)
+
+A pass targeting failure modes particular to online retail, rather than the
+generic OWASP categories above.
+
+| Check | Result |
+|---|---|
+| Price tampering | **Pass** - Saleor recalculates every total; cart amounts are display-only |
+| Quantity tampering (zero, negative, overflow) | **Pass** - bounded 1-20 per request, 99 per line, validated in both clients |
+| Cart/order IDOR | **Pass** - carts and orders resolve from the session identity; no endpoint accepts a user id |
+| Payment state forgery | **Pass** - RS256/JWKS-signed webhooks, deduplicated, transition-guarded |
+| Duplicate charge on retry | **Pass** - idempotency keys plus a durable CheckoutAttempt journal |
+| Checkout email substitution | **Pass** - taken from the authenticated user, and verification is required |
+| Order enumeration | **Pass** - order lookups are queryset-scoped to the owner |
+| **Idempotency key collision across accounts** | **FIXED - see below** |
+| **Unbounded cart growth** | **FIXED - see below** |
+| Mixed-currency cart totals | Latent - see open items |
+| Coupons / gift cards / store credit | Not implemented; no exposure |
+| Inventory oversell | Owned by Saleor at checkout time |
+
+### Fixed: cross-account idempotency key (information disclosure + denial of checkout)
+
+The REST API lets the client choose its own `Idempotency-Key`, while
+`place_order_once` looked the key up **globally**:
+`Order.objects.filter(idempotency_key=key)` with no user filter, and a
+`CheckoutAttempt` unique on the key alone.
+
+Two consequences. An account that submitted a key another account had
+already used was handed **that account's order** (id, Saleor order id,
+total, status). And an attacker could pre-register `CheckoutAttempt` rows
+under guessable keys ("1", "test", a timestamp) so a victim's checkout
+returned `409 checkout_in_progress` indefinitely.
+
+Keys are now bound to their owner before reaching the database
+(`scoped_idempotency_key` = SHA-256 of `user.pk:key`), and every lookup is
+additionally user-filtered. Scoping happens inside `place_order_once`, so
+no caller can forget it. The unique constraints are unchanged, so no
+migration was required.
+
+### Fixed: unbounded cart growth (denial of service, storage abuse)
+
+Per-item quantity was capped but the number of *distinct* line items was
+not. An authenticated client could add products until the cart document
+approached MongoDB's 16 MB ceiling, after which every write to that cart
+fails permanently and each read transfers megabytes. Carts are now capped
+at 50 distinct products, enforced atomically in the update filter
+(`$expr` on `$size`) so a concurrent burst cannot race past the limit;
+both clients report it (`409 cart_full` / a storefront message).
+
+### Open: mixed-currency cart totals
+
+Cart totals sum `price_amount` across line items and display whichever
+currency appears last, so a cart holding two currencies shows a
+meaningless total. Not currently reachable - the storefront uses a single
+Saleor channel, so every product shares one currency - and checkout
+recalculates upstream regardless, so it cannot cause a mispriced order.
+It becomes a real defect the moment a second channel or currency is
+added. Fix by grouping totals per currency, or by refusing to mix
+currencies in one cart.
+
 ## 7. Mitigation status
 
 Implemented on this branch after the initial assessment:

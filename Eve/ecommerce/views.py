@@ -6,6 +6,7 @@ domain results into templates and redirects.
 """
 import logging
 
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.http import Http404, HttpResponseBadRequest
 from django.shortcuts import redirect, render
@@ -13,6 +14,7 @@ from django.views.decorators.http import require_POST
 
 from .services.cart_service import (
     MAX_REQUEST_QUANTITY,
+    CartFullError,
     add_to_cart,
     get_cart,
     remove_from_cart,
@@ -131,7 +133,14 @@ def add_to_cart_view(request, slug):
         return HttpResponseBadRequest("Invalid quantity.")
 
     product = _get_product_or_404(slug)
-    add_to_cart(request.user.id, product, quantity)
+    try:
+        add_to_cart(request.user.id, product, quantity)
+    except CartFullError as exc:
+        messages.error(
+            request,
+            f"Your cart already holds the maximum of {exc.args[0]} different "
+            "products. Remove one before adding another.",
+        )
 
     return redirect("cart")
 

@@ -21,12 +21,32 @@ logger = logging.getLogger(__name__)
 CHECKOUT_LEASE_SECONDS = 60
 
 
+def scoped_idempotency_key(user, raw_key: str) -> str:
+    """Bind an idempotency key to its owner before it reaches the database.
+
+    API clients choose their own key, and both the Order and CheckoutAttempt
+    lookups are keyed on it. Unscoped, a caller who supplied a key another
+    account had already used would be handed that account's order back, and
+    could pre-register keys to block a victim's checkout with a permanent
+    409. Hashing the key together with the user id makes a cross-account
+    collision impossible while keeping the unique constraints intact.
+    """
+    return hashlib.sha256(f"{user.pk}:{raw_key}".encode()).hexdigest()
+
+
 def place_order_once(*, user, cart, idempotency_key):
-    """Serialize Saleor mutations and the local order write per user."""
+    """Serialize Saleor mutations and the local order write per user.
+
+    `idempotency_key` is the raw, caller-supplied value; it is scoped to the
+    user here so no caller can forget to.
+    """
+    idempotency_key = scoped_idempotency_key(user, idempotency_key)
     with cache_lease(f"checkout:user:{user.pk}", timeout=CHECKOUT_LEASE_SECONDS) as owner:
         if not owner:
             return None
-        existing = Order.objects.filter(idempotency_key=idempotency_key).first()
+        existing = Order.objects.filter(
+            idempotency_key=idempotency_key, user=user
+        ).first()
         if existing:
             return existing
 
@@ -39,8 +59,18 @@ def place_order_once(*, user, cart, idempotency_key):
             defaults={"user": user, "cart_fingerprint": cart_fingerprint},
         )
         if not created:
+            if attempt.user_id != user.pk:
+                # Unreachable while keys are scoped; refuse rather than ever
+                # act on another account's attempt.
+                logger.error(
+                    "Checkout attempt %s belongs to another user; refusing",
+                    attempt.pk,
+                )
+                return None
             if attempt.state == CheckoutAttempt.State.COMPLETED:
-                return Order.objects.filter(idempotency_key=idempotency_key).first()
+                return Order.objects.filter(
+                    idempotency_key=idempotency_key, user=user
+                ).first()
             if not (
                 attempt.state == CheckoutAttempt.State.FAILED
                 and not attempt.saleor_checkout_id

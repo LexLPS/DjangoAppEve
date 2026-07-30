@@ -38,7 +38,8 @@ SLO_BUDGETS_MS = {
     "GET /shop/product/[hit]":          (200, P95_BUDGETS_MS["GET /shop/product/[hit]"], 1000),
     # A miss is allowed one upstream Saleor call
     "GET /shop/product/[miss]":         (400, P95_BUDGETS_MS["GET /shop/product/[miss]"], 1500),
-    # Login is dominated by PBKDF2 password hashing (deliberately slow)
+    # Login includes memory-hard Argon2id password verification. Monitor RAM
+    # during ramp-up because concurrent hashes multiply its memory cost.
     "POST /accounts/login/":            (600, P95_BUDGETS_MS["POST /accounts/login/"], 1500),
     "POST /shop/cart/add/":             (200, P95_BUDGETS_MS["POST /shop/cart/add/"], 1000),
     "GET /shop/cart/":                  (200, P95_BUDGETS_MS["GET /shop/cart/"], 1000),
@@ -125,13 +126,23 @@ class ShopperUser(HttpUser):
                   "csrfmiddlewaretoken": token},
             headers={"Referer": self.client.base_url},
             name="POST /accounts/login/", catch_response=True,
+            allow_redirects=False,
         ) as response:
             if response.status_code == 429:
                 # Rate limited: raise RATE_LIMIT_SCALE on staging
                 response.failure("throttled (raise RATE_LIMIT_SCALE)")
                 return False
+            # A rejected Django form returns HTTP 200, so response.ok is not
+            # evidence of authentication. A successful login redirects and
+            # establishes the configured session cookie.
+            if response.status_code not in (302, 303):
+                response.failure(f"login rejected ({response.status_code})")
+                return False
+            if not self.client.cookies.get("sessionid"):
+                response.failure("login did not establish a session")
+                return False
             response.success()
-            return "_auth_user_id" in str(self.client.cookies) or response.ok
+            return True
 
     @tag("cart")
     @task(5)
@@ -194,7 +205,10 @@ class WebhookBurstUser(HttpUser):
     """Saleor delivering signed order events, in bursts rather than evenly -
     verification (JWKS + RSA) and the row-locked update are the hot path."""
 
-    weight = 1
+    # A manifest without a signing key deliberately omits webhook traffic.
+    # A zero weight prevents Locust from repeatedly spawning and stopping
+    # replacement users for a stage that cannot run.
+    weight = 1 if SIGNER is not None else 0
     wait_time = between(5, 10)
     BURST_SIZE = 10
 
@@ -241,18 +255,41 @@ class WebhookBurstUser(HttpUser):
 # means the request was queueing (worker saturation) or on the network -
 # not that the view is slow.
 _OVERHEAD = {"server_ms": [], "client_ms": []}
+# Per-endpoint breakdown: where does the server-side time actually go?
+_BREAKDOWN = {}
+
+
+def _parse_server_timing(header):
+    """'app;dur=12.3, db;dur=4, mongo;dur=8' -> {'app': 12.3, ...}"""
+    metrics = {}
+    for part in header.split(","):
+        piece = part.strip()
+        if ";dur=" not in piece:
+            continue
+        name, _, value = piece.partition(";dur=")
+        try:
+            metrics[name.strip()] = float(value)
+        except ValueError:
+            continue
+    return metrics
 
 
 @events.request.add_listener
-def _record_server_timing(response_time, response, **kwargs):
+def _record_server_timing(response_time, response, name=None, **kwargs):
     header = getattr(response, "headers", {}).get("Server-Timing", "") if response else ""
-    for part in header.split(","):
-        if part.strip().startswith("app;dur="):
-            try:
-                _OVERHEAD["server_ms"].append(float(part.split("=", 1)[1]))
-                _OVERHEAD["client_ms"].append(response_time)
-            except (ValueError, IndexError):
-                pass
+    metrics = _parse_server_timing(header)
+    if "app" not in metrics:
+        return
+    _OVERHEAD["server_ms"].append(metrics["app"])
+    _OVERHEAD["client_ms"].append(response_time)
+
+    entry = _BREAKDOWN.setdefault(
+        name or "?", {"app": [], "db": [], "mongo": [], "client": []}
+    )
+    entry["app"].append(metrics["app"])
+    entry["db"].append(metrics.get("db", 0.0))
+    entry["mongo"].append(metrics.get("mongo", 0.0))
+    entry["client"].append(response_time)
 
 
 def _percentile(values, quantile):
@@ -304,6 +341,23 @@ def enforce_slos(environment, **kwargs):
         if _percentile(overhead, 0.95) > _percentile(server, 0.95):
             print("  => dominated by queueing/network: scale workers or replicas,")
             print("     not application code.")
+
+    if _BREAKDOWN:
+        # p50 isolates the fixed cost of each endpoint from contention
+        print(
+            "\nServer-side p50 breakdown (ms) - 'other' is Python, cache,\n"
+            "session handling and password hashing:\n"
+            f"  {'endpoint':30} {'client':>7} {'app':>7} {'postgres':>9} "
+            f"{'mongo':>7} {'other':>7}"
+        )
+        for endpoint, samples in sorted(_BREAKDOWN.items()):
+            app = _percentile(samples["app"], 0.50)
+            db = _percentile(samples["db"], 0.50)
+            mongo = _percentile(samples["mongo"], 0.50)
+            print(
+                f"  {endpoint[:29]:30} {_percentile(samples['client'], 0.50):>7.0f} "
+                f"{app:>7.0f} {db:>9.0f} {mongo:>7.0f} {max(app - db - mongo, 0):>7.0f}"
+            )
 
     if failures:
         environment.process_exit_code = 1

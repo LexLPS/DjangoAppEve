@@ -414,6 +414,21 @@ if SENTRY_DSN:
         before_send=_scrub_sentry_event,
     )
 
+# --- Password hashing
+# Argon2id is the OWASP-preferred hasher and, on the small shared vCPUs this
+# runs on, materially cheaper than Django's 1.2M-iteration PBKDF2 (measured:
+# a login cost ~3.2s of CPU on staging). The PBKDF2 hashers stay listed so
+# existing passwords still verify; Django transparently upgrades each hash
+# on the owner's next successful login.
+# Note: Argon2 is memory-hard (~100 MiB per concurrent hash by default);
+# budget RAM as workers x threads x memory_cost.
+PASSWORD_HASHERS = [
+    "django.contrib.auth.hashers.Argon2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2PasswordHasher",
+    "django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher",
+    "django.contrib.auth.hashers.ScryptPasswordHasher",
+]
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 

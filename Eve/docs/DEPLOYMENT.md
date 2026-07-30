@@ -114,3 +114,9 @@ kept, and restrict allowed methods/headers to what the frontend uses.
 file, `ruff` + `bandit` static analysis, and gitleaks secret scanning.
 **Mark all five jobs as required status checks in GitHub branch protection**
 so a red check blocks merging — and deploy only from `main`.
+
+The post-deployment workflow requires the non-secret GitHub Actions repository
+variable `STAGING_APP_URL` to contain the staging application's credential-free
+HTTPS origin (for example, `https://app-staging.example.com`). Do not use the
+Railway project/dashboard URL: it returns HTML and cannot satisfy the JSON
+liveness and readiness probes.

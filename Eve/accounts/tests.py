@@ -3,7 +3,7 @@ import re
 from django.contrib.auth.models import User
 from django.core import mail
 from django.core.cache import cache
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from .models import Profile
@@ -355,3 +355,48 @@ class PrivacyWorkflowTests(TestCase):
         with self.assertRaises(CommandError):
             call_command("purge_user", "alice", "--performed-by", "dpo")
         self.assertTrue(User.objects.filter(username="alice").exists())
+
+
+# The test settings swap in MD5 for speed; these tests must exercise the
+# real production hasher configuration instead.
+from eve.settings import base as base_settings  # noqa: E402
+
+
+@override_settings(PASSWORD_HASHERS=base_settings.PASSWORD_HASHERS)
+class PasswordHashingTests(TestCase):
+    """Argon2id is the preferred hasher, but existing PBKDF2 passwords must
+    keep working and upgrade themselves on next login."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_new_passwords_use_argon2(self):
+        user = User.objects.create_user("newbie", "newbie@example.com", "S3curePass!x")
+        self.assertTrue(user.password.startswith("argon2"))
+
+    def test_existing_pbkdf2_password_still_authenticates(self):
+        from django.contrib.auth.hashers import make_password
+
+        user = User.objects.create_user("legacy", "legacy@example.com", "unused")
+        user.password = make_password(
+            "S3curePass!x", hasher="pbkdf2_sha256"
+        )
+        user.save(update_fields=["password"])
+        self.assertTrue(user.password.startswith("pbkdf2_"))
+
+        logged_in = self.client.login(username="legacy", password="S3curePass!x")
+        self.assertTrue(logged_in, "legacy passwords must keep working")
+
+    def test_login_upgrades_a_legacy_hash_in_place(self):
+        from django.contrib.auth.hashers import make_password
+
+        user = User.objects.create_user("upgrade", "upgrade@example.com", "unused")
+        user.password = make_password("S3curePass!x", hasher="pbkdf2_sha256")
+        user.save(update_fields=["password"])
+
+        self.client.login(username="upgrade", password="S3curePass!x")
+        user.refresh_from_db()
+        self.assertTrue(
+            user.password.startswith("argon2"),
+            "Django should rehash to the preferred hasher on login",
+        )

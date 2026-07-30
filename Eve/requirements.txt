@@ -1,5 +1,6 @@
 # Direct dependencies, pinned. Full transitive pins live in requirements.lock;
 # install with: pip install -r requirements.lock
+argon2-cffi==25.1.0
 Django==5.2.16
 djangorestframework==3.16.1
 drf-spectacular==0.30.0

@@ -26,4 +26,6 @@ jobs:
       - name: Verify three consecutive healthy probe rounds
         run: python Eve/deploy/verify_deployment.py --base-url "$DEPLOYMENT_URL"
         env:
-          DEPLOYMENT_URL: ${{ github.event.deployment_status.environment_url }}
+          # Railway reports its dashboard as environment_url, not the public
+          # application origin. Keep the non-secret probe origin explicit.
+          DEPLOYMENT_URL: ${{ vars.STAGING_APP_URL }}

@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from core.monitoring import MongoPoolLogger
+from core.monitoring import MongoCommandTimer, MongoPoolLogger
 from django.conf import settings
 from pymongo import MongoClient
 
@@ -13,7 +13,7 @@ client = MongoClient(
     maxPoolSize=settings.MONGODB.get("MAX_POOL_SIZE", 50),
     waitQueueTimeoutMS=2000,
     # Reports wait-queue pressure and pool exhaustion
-    event_listeners=[MongoPoolLogger()],
+    event_listeners=[MongoPoolLogger(), MongoCommandTimer()],
 )
 mongo_db = client[settings.MONGODB["DB_NAME"]]
 

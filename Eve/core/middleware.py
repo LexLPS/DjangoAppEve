@@ -8,6 +8,7 @@ from django.db import connection
 from django.http import Http404
 
 from .logging import request_id_var
+from .monitoring import mongo_ms_var
 
 request_logger = logging.getLogger("eve.requests")
 
@@ -82,10 +83,12 @@ class RequestMetricsMiddleware:
             return self.get_response(request)
 
         stats = _QueryStats()
+        mongo_ms_var.set(0.0)  # per-request MongoDB accumulator
         started = time.monotonic()
         with connection.execute_wrapper(stats):
             response = self.get_response(request)
         duration_ms = round((time.monotonic() - started) * 1000, 1)
+        mongo_ms = round(mongo_ms_var.get(), 1)
 
         route = getattr(getattr(request, "resolver_match", None), "route", "") or request.path
         level = logging.WARNING if duration_ms > self.SLOW_REQUEST_MS else logging.INFO
@@ -97,6 +100,7 @@ class RequestMetricsMiddleware:
             "duration_ms": duration_ms,
             "db_queries": stats.count,
             "db_ms": round(stats.seconds * 1000, 1),
+            "mongo_ms": mongo_ms,
         }
         queue_ms = self._queue_ms(request)
         if queue_ms is not None:
@@ -105,7 +109,11 @@ class RequestMetricsMiddleware:
         # Standard Server-Timing header: lets any client (browser devtools,
         # the load generator) separate time spent *in the application* from
         # time spent queueing or on the network, without log access.
-        timings = [f"app;dur={duration_ms}", f"db;dur={payload['db_ms']}"]
+        timings = [
+            f"app;dur={duration_ms}",
+            f"db;dur={payload['db_ms']}",
+            f"mongo;dur={mongo_ms}",
+        ]
         if queue_ms is not None:
             timings.append(f"queue;dur={queue_ms}")
         response.headers["Server-Timing"] = ", ".join(timings)

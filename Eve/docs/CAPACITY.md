@@ -66,6 +66,54 @@ co-located services and suggests the Atlas cluster is in a different region
 from the Railway service. Verify before further tuning — it affects every
 catalogue and cart request.
 
+## Second measurement (after the worker and cart fixes)
+
+Same profile, 723 requests at 6.1 req/s, zero failures. Aggregate p50 fell
+**580 ms -> 170 ms** and p95 **2300 ms -> 1300 ms**; throughput rose 13 %.
+The `Server-Timing` split showed in-app p50 147 ms against 28 ms of
+queue+network - so at the median the application is now the cost, and
+contention only dominates in the tail (p95: 713 ms app, 644 ms overhead).
+
+**Two hypotheses were falsified by this run, and one was found.**
+
+*Falsified - MongoDB round-trips.* Cutting `add_to_cart` from three
+operations to two moved its minimum by 3 % (1103 -> 1067 ms). Per-endpoint
+minimums barely moved anywhere. Cost is not proportional to Mongo
+operations.
+
+*Falsified - MongoDB latency generally.* Anonymous endpoints that read
+MongoDB are fast: the catalogue costs 36 ms and a cached product 171 ms.
+A slow or distant cluster could not produce those numbers.
+
+*Found - the cost tracks authentication, not storage:*
+
+| Anonymous | Authenticated |
+|---|---|
+| `GET /` 24 ms, catalogue 36 ms, login page 86 ms, product 171 ms | cart 456 ms, checkout 449 ms, history 736 ms, cart add 1067 ms, cart remove 914 ms |
+
+Every authenticated endpoint carries a ~450 ms floor that no anonymous
+endpoint pays. Session retrieval, the auth user lookup, and per-request
+cache work are the candidates. `Server-Timing` now carries `db;dur` and
+`mongo;dur`, and the load test prints a per-endpoint breakdown
+(`client / app / postgres / mongo / other`), so the next run attributes
+that 450 ms instead of inferring it.
+
+### Password hashing, measured
+
+Login's ~3.2 s floor is CPU-bound hashing, not queueing. Benchmarked
+locally (`make_password`, same machine, 3 runs):
+
+| Hasher | Cost per hash |
+|---|---|
+| PBKDF2-SHA256 (1.2M iterations, Django default) | **783 ms** |
+| Argon2id (Django defaults) | **76 ms** |
+
+Argon2id is **~10x cheaper** and is the OWASP-preferred hasher, so this is
+a security improvement that also removes the largest single latency cost.
+It is now the preferred hasher; existing PBKDF2 hashes keep verifying and
+upgrade in place on each owner's next login. Budget memory accordingly:
+Argon2 is memory-hard at ~100 MiB per concurrent hash.
+
 ## Projection to the go-live target (200 users)
 
 Scaling the measured profile ×10:

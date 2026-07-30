@@ -241,18 +241,41 @@ class WebhookBurstUser(HttpUser):
 # means the request was queueing (worker saturation) or on the network -
 # not that the view is slow.
 _OVERHEAD = {"server_ms": [], "client_ms": []}
+# Per-endpoint breakdown: where does the server-side time actually go?
+_BREAKDOWN = {}
+
+
+def _parse_server_timing(header):
+    """'app;dur=12.3, db;dur=4, mongo;dur=8' -> {'app': 12.3, ...}"""
+    metrics = {}
+    for part in header.split(","):
+        piece = part.strip()
+        if ";dur=" not in piece:
+            continue
+        name, _, value = piece.partition(";dur=")
+        try:
+            metrics[name.strip()] = float(value)
+        except ValueError:
+            continue
+    return metrics
 
 
 @events.request.add_listener
-def _record_server_timing(response_time, response, **kwargs):
+def _record_server_timing(response_time, response, name=None, **kwargs):
     header = getattr(response, "headers", {}).get("Server-Timing", "") if response else ""
-    for part in header.split(","):
-        if part.strip().startswith("app;dur="):
-            try:
-                _OVERHEAD["server_ms"].append(float(part.split("=", 1)[1]))
-                _OVERHEAD["client_ms"].append(response_time)
-            except (ValueError, IndexError):
-                pass
+    metrics = _parse_server_timing(header)
+    if "app" not in metrics:
+        return
+    _OVERHEAD["server_ms"].append(metrics["app"])
+    _OVERHEAD["client_ms"].append(response_time)
+
+    entry = _BREAKDOWN.setdefault(
+        name or "?", {"app": [], "db": [], "mongo": [], "client": []}
+    )
+    entry["app"].append(metrics["app"])
+    entry["db"].append(metrics.get("db", 0.0))
+    entry["mongo"].append(metrics.get("mongo", 0.0))
+    entry["client"].append(response_time)
 
 
 def _percentile(values, quantile):
@@ -304,6 +327,23 @@ def enforce_slos(environment, **kwargs):
         if _percentile(overhead, 0.95) > _percentile(server, 0.95):
             print("  => dominated by queueing/network: scale workers or replicas,")
             print("     not application code.")
+
+    if _BREAKDOWN:
+        # p50 isolates the fixed cost of each endpoint from contention
+        print(
+            "\nServer-side p50 breakdown (ms) - 'other' is Python, cache,\n"
+            "session handling and password hashing:\n"
+            f"  {'endpoint':30} {'client':>7} {'app':>7} {'postgres':>9} "
+            f"{'mongo':>7} {'other':>7}"
+        )
+        for endpoint, samples in sorted(_BREAKDOWN.items()):
+            app = _percentile(samples["app"], 0.50)
+            db = _percentile(samples["db"], 0.50)
+            mongo = _percentile(samples["mongo"], 0.50)
+            print(
+                f"  {endpoint[:29]:30} {_percentile(samples['client'], 0.50):>7.0f} "
+                f"{app:>7.0f} {db:>9.0f} {mongo:>7.0f} {max(app - db - mongo, 0):>7.0f}"
+            )
 
     if failures:
         environment.process_exit_code = 1

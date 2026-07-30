@@ -9,6 +9,7 @@ Two mechanisms:
 
 Everything logs structured events; nothing here needs a metrics backend.
 """
+import contextvars
 import logging
 
 from django.conf import settings
@@ -17,6 +18,31 @@ from django.utils import timezone
 from pymongo import monitoring
 
 logger = logging.getLogger("eve.resources")
+
+# Milliseconds spent in MongoDB during the current request. Set per request
+# by RequestMetricsMiddleware and reported as Server-Timing `mongo;dur`, so
+# the share of a slow request that is MongoDB can be measured rather than
+# inferred.
+mongo_ms_var = contextvars.ContextVar("mongo_ms", default=0.0)
+
+
+class MongoCommandTimer(monitoring.CommandListener):
+    """Accumulates MongoDB command duration into the per-request counter."""
+
+    def _record(self, event):
+        try:
+            mongo_ms_var.set(mongo_ms_var.get() + event.duration_micros / 1000)
+        except Exception:  # telemetry must never break a query
+            pass
+
+    def succeeded(self, event):
+        self._record(event)
+
+    def failed(self, event):
+        self._record(event)
+
+    def started(self, event):
+        pass
 
 # Only report check-outs that actually waited — every request checks out a
 # connection, so logging them all would drown the log

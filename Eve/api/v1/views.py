@@ -26,12 +26,12 @@ from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from api.authentication import HashedTokenAuthentication
 from api.errors import APIError
 from api.models import ApiToken
+from api.throttling import ScopedRateThrottle
 
 from .serializers import (
     AddCartItemSerializer,

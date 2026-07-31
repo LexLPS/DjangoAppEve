@@ -257,7 +257,20 @@ EMAIL_BACKEND = config(
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@localhost")
 PUBLIC_BASE_URL = config("PUBLIC_BASE_URL", default="http://localhost:8000")
 
-DATABASES = {
+# DB_ENGINE=sqlite gives a zero-dependency evaluation path: `runserver`
+# works on a fresh clone with no PostgreSQL installed. prod.py refuses it,
+# so it can never reach a deployed environment.
+DB_ENGINE = config("DB_ENGINE", default="postgresql")
+
+if DB_ENGINE == "sqlite":
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
+    }
+else:
+    DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
         "NAME": config("DB_NAME", default="eve_db"),
@@ -270,11 +283,15 @@ DATABASES = {
         "CONN_MAX_AGE": config("DB_CONN_MAX_AGE", default=60, cast=int),
         "CONN_HEALTH_CHECKS": True,
     }
-}
+    }
 MONGODB = {
     "HOST": config("MONGODB_URI", default="mongodb://localhost:27017"),
     "DB_NAME": config("MONGODB_DB_NAME", default="EVEDB"),
     "MAX_POOL_SIZE": config("MONGODB_MAX_POOL_SIZE", default=50, cast=int),
+    # Lower this locally so a machine without MongoDB fails fast
+    "SERVER_SELECTION_TIMEOUT_MS": config(
+        "MONGODB_SERVER_SELECTION_TIMEOUT_MS", default=5000, cast=int
+    ),
 }
 
 # Reverse proxies whose X-Forwarded-For may be trusted for the client IP
@@ -321,9 +338,10 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
+    # Fail-open variants: a cache outage must not 500 the whole API
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
+        "api.throttling.AnonRateThrottle",
+        "api.throttling.UserRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "30/min",

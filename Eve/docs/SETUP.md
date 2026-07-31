@@ -4,134 +4,167 @@ This guide takes a new clone from an empty machine to a working Eve instance.
 Commands are run from the repository's `Eve/` directory unless stated
 otherwise.
 
-## 1. Prerequisites
+## 1. Which path do you need?
 
-Choose one setup path:
+The three paths differ only in how much you install. Start at the top and
+move down as you need more.
 
-### Docker path (recommended)
+| Path | Installs | Gets you |
+|---|---|---|
+| **A. Evaluation** | Python only | The app running, the test suite passing, the API and its docs. Demo catalogue, no real shop |
+| **B. Full local** | + PostgreSQL, MongoDB, Redis | Real carts, sessions shared across workers, background jobs |
+| **C. Docker** | Docker only | Path B's services in containers, production-shaped behind nginx |
 
-- Git
-- Docker Desktop or Docker Engine with Compose
-- A Saleor Cloud environment if catalogue and checkout features are required
+All paths need **Python 3.13** and **Git**. Commands run from the
+repository's `Eve/` directory unless stated otherwise.
 
-Docker Compose supplies PostgreSQL, MongoDB, Redis, nginx, and the Django app.
-
-### Native Python path
-
-- Git
-- Python 3.13
-- PostgreSQL 16+
-- MongoDB 7+
-- Redis 7+ (optional for basic development; required to reproduce production
-  sessions, rate limits, and lockouts)
-- A C compiler may be needed if a binary dependency is unavailable for the
-  operating system
-
-## 2. Clone and configure
+## 2. Clone and configure (all paths)
 
 ```bash
 git clone https://github.com/LexLPS/DjangoAppEve.git
+```
+
+```bash
 cd DjangoAppEve/Eve
+```
+
+Create the virtual environment:
+
+```bash
+python -m venv venv
+```
+
+Activate it — `source venv/bin/activate` on Linux/macOS, or
+`.\venv\Scripts\Activate.ps1` in Windows PowerShell. Then install the
+locked dependency set:
+
+```bash
+python -m pip install -r requirements.lock
 ```
 
 Copy the environment template:
 
 ```bash
-# Linux/macOS
 cp .env.example .env
-
-# Windows PowerShell
-Copy-Item .env.example .env
 ```
 
-Generate a unique development secret instead of using the example:
+On Windows PowerShell use `Copy-Item .env.example .env`.
+
+**`.env.example` is deliberately zero-dependency as shipped**: SQLite, an
+in-process cache, and no Saleor. It runs as-is. Generate your own
+development secret and paste it into `DJANGO_SECRET_KEY`:
 
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(64))"
 ```
 
-Put that value in `DJANGO_SECRET_KEY`. The `.env` file is ignored by Git and
-must never be committed.
+`.env` is gitignored and must never be committed.
 
-## 3A. Run with Docker Compose
+## 3A. Path A — evaluation, no services required
 
-For Compose, keep the development runtime and set these values in `.env`:
+```bash
+python manage.py migrate
+```
+
+```bash
+python manage.py runserver
+```
+
+Open <http://127.0.0.1:8000/>. What works without any service installed:
+
+- the storefront, with a small built-in demo catalogue;
+- registration, login, and the profile pages;
+- the REST API and its documentation at `/api/v1/docs/`;
+- the whole test suite:
+
+```bash
+python manage.py test --settings=eve.settings.test
+```
+
+The suite is **hermetic** — it never contacts PostgreSQL, MongoDB, Redis,
+Saleor or SMTP, so it passes on a clean machine. Emails (verification,
+password reset) are printed to the terminal.
+
+What does **not** work on this path, by design: carts and real products
+need MongoDB and Saleor, so `/api/v1/products/` answers `503
+catalogue_unavailable` rather than inventing data, and background jobs need
+a broker. Add those in path B.
+
+## 3B. Path B — full local stack
+
+Install PostgreSQL 16+, MongoDB 7+ and Redis 7+, then create the database
+role. One possible `psql` setup:
+
+```sql
+CREATE USER eve_user WITH PASSWORD 'choose-a-local-password';
+```
+
+```sql
+CREATE DATABASE eve_db OWNER eve_user;
+```
+
+Now edit `.env` to point at the services you just installed:
 
 ```dotenv
-DJANGO_ENV=dev
-DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
+DB_ENGINE=postgresql
+DB_PASSWORD=the-password-you-just-chose
+REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/1
+MONGODB_SERVER_SELECTION_TIMEOUT_MS=5000
+```
+
+`DB_PASSWORD` must match the role exactly, or `migrate` fails with
+`password authentication failed for user "eve_user"`.
+
+```bash
+python manage.py migrate
+```
+
+```bash
+python manage.py ensure_indexes
+```
+
+```bash
+python manage.py createsuperuser
+```
+
+```bash
+python manage.py runserver
+```
+
+Background jobs need a worker and scheduler alongside `runserver`; see
+`docs/BACKGROUND_JOBS.md`.
+
+## 3C. Path C — Docker Compose
+
+Compose supplies PostgreSQL, MongoDB, Redis, nginx and the app. Set these
+in `.env` first — the container hostnames replace `localhost`:
+
+```dotenv
+DB_ENGINE=postgresql
+DB_PASSWORD=choose-a-local-password
 DJANGO_CSRF_TRUSTED_ORIGINS=http://localhost:8080
 DB_SSLMODE=disable
 ```
 
-The Compose file supplies the internal database hostnames, overrides the
-runtime to `dev`, and runs nginx on port 8080. This is production-shaped in
-its service layout, but it is not a production deployment: its internal
-database traffic and public endpoint use local non-TLS networking.
-
 ```bash
 docker compose up --build -d
+```
+
+```bash
 docker compose exec web python manage.py migrate
+```
+
+```bash
 docker compose exec web python manage.py ensure_indexes
-docker compose exec web python manage.py createsuperuser
 ```
 
-Open <http://localhost:8080/>. Inspect logs with:
+Open <http://localhost:8080/>. Follow logs with `docker compose logs -f web
+nginx`. `docker compose down` stops the stack; **do not** add `-v` unless
+you want to erase the local databases.
 
-```bash
-docker compose logs -f web nginx
-```
-
-Stop the stack without deleting its database volumes:
-
-```bash
-docker compose down
-```
-
-Do not use `docker compose down -v` unless you deliberately want to erase the
-local databases.
-
-## 3B. Run natively
-
-Create and activate a virtual environment:
-
-```bash
-python -m venv venv
-
-# Linux/macOS
-source venv/bin/activate
-
-# Windows PowerShell
-.\venv\Scripts\Activate.ps1
-```
-
-Install the fully locked dependency set:
-
-```bash
-python -m pip install --upgrade pip
-python -m pip install -r requirements.lock
-```
-
-Create a PostgreSQL database and application user. One possible `psql` setup
-is:
-
-```sql
-CREATE USER eve_user WITH PASSWORD 'choose-a-local-password';
-CREATE DATABASE eve_db OWNER eve_user;
-```
-
-Start MongoDB and Redis, then make the `.env` connection values match those
-services. Apply the schemas and indexes:
-
-```bash
-python manage.py migrate
-python manage.py ensure_indexes
-python manage.py createsuperuser
-python manage.py runserver
-```
-
-Open <http://127.0.0.1:8000/>. Development email messages, including email
-verification and password-reset links, are printed in the terminal by default.
+This layout is production-*shaped*, not a production deployment: its
+internal traffic and public endpoint use local non-TLS networking.
 
 ## 4. Configure your own Saleor environment
 

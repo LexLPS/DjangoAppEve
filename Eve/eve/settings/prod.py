@@ -35,8 +35,13 @@ CSRF_TRUSTED_ORIGINS = config("DJANGO_CSRF_TRUSTED_ORIGINS", default="", cast=Cs
 
 # --- Backends: all required, no fallbacks to dev defaults ---
 
-# PostgreSQL over TLS
+# PostgreSQL over TLS. The engine is set explicitly: base.py allows a
+# SQLite evaluation mode, and inheriting it here would silently run a
+# deployment on a local file.
+if DB_ENGINE == "sqlite":
+    raise ImproperlyConfigured("DB_ENGINE=sqlite is a local evaluation mode only.")
 DATABASES["default"].update({
+    "ENGINE": "django.db.backends.postgresql",
     "NAME": config("DB_NAME"),
     "USER": config("DB_USER"),
     "PASSWORD": config("DB_PASSWORD"),

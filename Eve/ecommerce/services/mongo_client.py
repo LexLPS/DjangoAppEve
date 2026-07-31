@@ -9,7 +9,7 @@ from pymongo import MongoClient
 # is capped per process (size Mongo's max connections to workers × pool)
 client = MongoClient(
     settings.MONGODB["HOST"],
-    serverSelectionTimeoutMS=5000,
+    serverSelectionTimeoutMS=settings.MONGODB.get("SERVER_SELECTION_TIMEOUT_MS", 5000),
     maxPoolSize=settings.MONGODB.get("MAX_POOL_SIZE", 50),
     waitQueueTimeoutMS=2000,
     # Reports wait-queue pressure and pool exhaustion

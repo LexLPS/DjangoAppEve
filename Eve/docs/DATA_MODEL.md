@@ -1,56 +1,49 @@
-# Eve
+# Data model and use cases
 
 Eve is a Django web application for browsing and purchasing virtual-reality
-experiences. It combines Django accounts and orders with a Saleor catalogue,
-MongoDB-backed carts, Redis-backed sessions and rate limits, and signed Saleor
-order webhooks.
+experiences, aimed at long-term hospital patients. It combines Django
+accounts and orders with a Saleor Cloud catalogue, MongoDB-backed carts,
+Redis-backed shared state, and signed Saleor order webhooks.
 
-## What the application does
+The application uses **polyglot persistence**: three databases with three
+different data models, each chosen for the shape and lifetime of the state
+it holds. The rule that keeps this coherent: **only PostgreSQL is
+authoritative** — losing MongoDB costs carts and a cache; losing Redis costs
+throttling precision and cached sessions; neither can lose an order or a
+payment state. The full rationale, including the rejected single-database
+alternative, is in [ADR-0003](adr/0003-three-datastores.md).
 
-- Registers users, verifies email addresses, and supports login, logout,
-  password reset, profiles, and privacy export/deletion workflows.
-- Reads products and authoritative prices from Saleor over GraphQL.
-- Caches catalogue data and stores user carts in MongoDB.
-- Creates Saleor checkouts using server-side product and price data.
-- Stores local order history in PostgreSQL.
-- Processes paid, refunded, fully-refunded, and cancelled order events through
-  RS256-signed Saleor webhooks.
-- Protects authentication with shared rate limits and account lockouts.
-- Supports administrator TOTP MFA, configurable admin paths, and an optional
-  administrator IP allowlist.
-- Provides structured request logging, Sentry integration, and liveness and
-  readiness endpoints.
+| Store | Model type | Holds | Why this model |
+|---|---|---|---|
+| **PostgreSQL** | Relational (SQL) | Users, profiles, orders, checkout journal, webhook inbox, refresh tokens, audit log, sessions | Transactions, constraints, and row locking for everything involving money or identity |
+| **MongoDB** | Document (NoSQL) | Carts, product cache | Nested, schemaless documents mirroring Saleor's product shape; atomic array operators for concurrent cart writes |
+| **Redis** | Key-value (NoSQL) | Rate limits, lockouts, leases, circuit breaker, caches, Celery broker | Fast shared expiring state across all web and worker processes |
 
-Checkout is disabled by default. This is intentional: every installation must
-connect and test its own Saleor environment before accepting orders.
+## Use cases
 
-## Architecture
+Status: ✅ implemented · 🚧 implemented behind a flag · ❌ not implemented.
 
-```text
-Browser
-  |
-  v
-reverse proxy / Railway edge
-  |
-  v
-Django + Gunicorn
-  |-- PostgreSQL: users, profiles, contact messages, orders, sessions
-  |-- MongoDB: carts and product cache
-  |-- Redis: cache, sessions, rate limits, account lockouts
-  `-- Saleor Cloud: catalogue, checkout, order events
-```
+| Use case | Data touched | Status |
+|---|---|---|
+| Register an account and verify the email address | PostgreSQL (`User`, `Profile`) | ✅ Implemented |
+| Log in / log out / reset password (rate-limited, with lockout) | PostgreSQL, Redis (counters) | ✅ Implemented |
+| Manage profile (patient flag, hospital, room, VR preference) | PostgreSQL (`Profile`) | ✅ Implemented |
+| Administrator login with TOTP MFA | PostgreSQL (`TOTPDevice`) | ✅ Implemented |
+| Browse the catalogue and view products | MongoDB (product cache), Saleor on miss | ✅ Implemented |
+| Add to / remove from / view the cart | MongoDB (`carts`) | ✅ Implemented |
+| Place an order (idempotent, journaled checkout) | PostgreSQL (`CheckoutAttempt`, `Order`), Saleor | 🚧 Implemented; disabled by default until an installation verifies its own Saleor environment (`CHECKOUT_ENABLED`) |
+| View order history | PostgreSQL (`Order`) | ✅ Implemented |
+| Process paid / refunded / cancelled order events | PostgreSQL (`WebhookEvent`, `Order`) | ✅ Implemented |
+| Recover lost orders via reconciliation | PostgreSQL, Saleor | ✅ Implemented |
+| Issue / refresh / revoke API tokens | PostgreSQL (`RefreshToken`) | ✅ Implemented |
+| Consume everything above via the REST API (`/api/v1/`) | Same stores as the HTML views | ✅ Implemented |
+| Export or delete a user's data (privacy workflows, audited) | PostgreSQL (`PrivacyActionLog`), MongoDB | ✅ Implemented (operator-run) |
+| Send a contact message | PostgreSQL (`ContactMessage`) | ✅ Implemented |
+| Live payment capture in production | Saleor payment app | ❌ Not implemented — requires configuring a Saleor payment application and accepting a real low-value checkout first |
+| Multi-currency carts | MongoDB, Saleor | ❌ Not implemented — a single Saleor channel makes mixed currencies unreachable; totals for that case are known-wrong and tracked in the threat model (checkout would still price correctly, since Saleor recalculates) |
+| Multi-channel / multi-region catalogue | Saleor | ❌ Not implemented |
 
-The application is stateless at the web-process layer and can be scaled across
-multiple workers or instances when all three data services are shared.
-
-## Databases
-
-Eve uses polyglot persistence: **PostgreSQL** (relational, authoritative),
-**MongoDB** (document), and **Redis** (key-value). Only PostgreSQL is the
-system of record. Full details, use cases, and rationale are in
-[Eve/docs/DATA_MODEL.md](Eve/docs/DATA_MODEL.md).
-
-### Where each kind of state lives
+## Where each kind of state lives
 
 ```mermaid
 flowchart LR
@@ -84,7 +77,13 @@ flowchart LR
     class APP app
 ```
 
-### PostgreSQL — commerce (relational)
+## PostgreSQL — relational model (blue)
+
+Split into two diagrams for readability. `PK` = primary key, `FK` = foreign
+key, `UK` = unique constraint. Every table also has an implicit
+auto-increment `id` primary key unless another PK is shown.
+
+### Commerce: orders, checkout journal, webhook inbox
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
@@ -146,7 +145,13 @@ erDiagram
     }
 ```
 
-### PostgreSQL — identity, credentials, audit (relational)
+`Order.status` transitions are allow-listed in code (for example
+`refunded` is terminal); a webhook proposing an illegal transition is
+rejected and logged. `WEBHOOK_EVENT` is the durable inbox: rows are
+committed before the Celery task is published, so a broker failure loses
+nothing.
+
+### Identity, credentials, audit
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
@@ -214,7 +219,17 @@ erDiagram
     }
 ```
 
-### MongoDB — document shapes
+`PRIVACY_ACTION_LOG` deliberately stores the username as plain text rather
+than a foreign key, so the audit trail survives the deletion it records.
+`SESSION` is Django's `cached_db` engine: reads come from Redis, writes are
+mirrored here, so PostgreSQL remains the session source of truth.
+
+## MongoDB — document model (green)
+
+Two collections. Freshness of the product cache is enforced **at query
+time** (`cached_at >= now - TTL`) rather than by deleting documents, so
+stale documents remain available as a fallback during a Saleor outage.
+Indexes are created by `manage.py ensure_indexes`.
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
@@ -263,7 +278,22 @@ classDiagram
     ProductDocument *-- Pricing
 ```
 
-### Redis — key patterns
+Why a document store fits here: the cart is one nested document per user,
+mutated with **single atomic operators** (`$inc`, guarded `$push`, `$pull`,
+`$set` with array filters) so concurrent requests can never lose each
+other's writes; the `$push` carries an `$expr` size guard so a concurrent
+burst cannot race past the 50-item cap. Product documents mirror Saleor's
+nested GraphQL shape after validation and sanitization — no schema
+migration is needed when upstream fields change, and the whole collection
+can be dropped and rebuilt at will. Prices in both collections are
+**display-only**: checkout re-prices everything server-side via Saleor.
+
+## Redis — key-value model (red)
+
+All values are JSON or plain counters — pickle is disabled so a compromised
+Redis cannot execute code. Every key expires. The Celery broker runs on a
+**separate** Redis instance from the cache, because the cache may evict
+under memory pressure and a broker must not.
 
 ```mermaid
 flowchart TB
@@ -291,92 +321,32 @@ flowchart TB
     class AUTHK,LEASEK,RESK,SESSK grp
 ```
 
-## Technology
+Why a key-value store fits here: every entry is *shared, expiring, and
+disposable* — counters that must be visible to all web instances so a
+lockout on one replica holds on all of them, leases that guarantee a single
+flight across processes, and caches whose loss degrades performance but
+never correctness.
 
-- Python 3.13 and Django 5.2
-- Django REST Framework
-- PostgreSQL, MongoDB, and Redis
-- Saleor GraphQL
-- Gunicorn and nginx/Railway
-- Docker Compose for a production-shaped local stack
-- GitHub Actions with tests, Ruff, Bandit, pip-audit, and Gitleaks
+## Non-trivial aspects of the implementation
 
-## Start here
+- **Concurrency without transactions in MongoDB:** single atomic update
+  operators with array filters and an `$expr` size guard replace
+  read-modify-write cycles entirely.
+- **Unique constraints as concurrency control in PostgreSQL:** the
+  user-scoped idempotency key makes double-submits collapse into one order;
+  webhook processing takes row locks and enforces an allow-listed state
+  machine.
+- **The transactional inbox:** webhook events are committed to PostgreSQL
+  before the queue is involved, with a recovery schedule republishing
+  pending rows — Redis transports work, PostgreSQL records it.
+- **Split authority per datum:** sessions are read from Redis but owned by
+  PostgreSQL; product data is served from MongoDB but owned by Saleor;
+  prices are displayed from cache but only ever charged from a live
+  server-side recalculation.
 
-The complete clone-to-running instructions are in
-[Eve/docs/SETUP.md](Eve/docs/SETUP.md). They cover:
+## Related documentation
 
-1. Native and Docker-based local setup
-2. Every important environment variable
-3. PostgreSQL, MongoDB, and Redis initialization
-4. Creating and configuring a Saleor Cloud environment
-5. Product, channel, checkout, and webhook configuration
-6. Running unit and live Saleor integration tests
-7. Deployment and production security requirements
-
-For the quickest local start:
-
-```bash
-git clone https://github.com/LexLPS/DjangoAppEve.git
-cd DjangoAppEve/Eve
-cp .env.example .env
-# Edit .env before continuing.
-docker compose up --build
-```
-
-Then open <http://localhost:8080/>.
-
-## Repository layout
-
-```text
-Eve/
-|-- accounts/       Authentication, profiles, MFA and privacy commands
-|-- core/           Landing/contact pages, middleware, health and throttling
-|-- ecommerce/      Saleor client, catalogue cache and MongoDB cart
-|-- payments/       Checkout, orders, reconciliation and signed webhooks
-|-- eve/settings/   Development, test, staging and production settings
-|-- deploy/         nginx configuration
-|-- docs/           Setup, deployment, operations, release and threat model
-|-- Dockerfile
-|-- docker-compose.yml
-`-- manage.py
-```
-
-## Useful commands
-
-Run these from the `Eve/` directory with the virtual environment activated:
-
-```bash
-python manage.py migrate
-python manage.py ensure_indexes
-python manage.py createsuperuser
-python manage.py runserver
-python manage.py test --settings=eve.settings.test
-```
-
-Health endpoints:
-
-- `/healthz/live/` confirms the Django process is running.
-- `/healthz/ready/` checks PostgreSQL, MongoDB, Redis/cache, and Saleor circuit
-  state.
-- `/healthz/` is a compatibility alias for readiness.
-
-## Further documentation
-
-- [Architecture decision records](Eve/docs/adr/README.md)
-- [Data model, databases, and use cases](Eve/docs/DATA_MODEL.md)
-- [REST API (v1) and OpenAPI schema](Eve/docs/API.md)
-- [Installation and Saleor setup](Eve/docs/SETUP.md)
-- [Deployment architecture](Eve/docs/DEPLOYMENT.md)
-- [Implemented cybersecurity measures](Eve/docs/SECURITY_MEASURES.md)
-- [Security operations](Eve/docs/SECURITY_OPERATIONS.md)
-- [Observability and alerts](Eve/docs/OBSERVABILITY.md)
-- [Capacity analysis and load-test evidence](Eve/docs/CAPACITY.md)
-- [Background jobs and Celery operations](Eve/docs/BACKGROUND_JOBS.md)
-- [Release process](Eve/docs/RELEASE.md)
-- [Threat model](Eve/docs/THREAT_MODEL.md)
-
-## License
-
-This project is proprietary. Contact the Eve team before redistributing or
-using it commercially.
+- [ADR-0003 — why three datastores](adr/0003-three-datastores.md)
+- [Threat model](THREAT_MODEL.md) — trust boundaries between the stores
+- [Security measures](SECURITY_MEASURES.md) — store-specific protections
+- [Setup guide](SETUP.md) — initializing all three databases

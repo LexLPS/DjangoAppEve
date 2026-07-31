@@ -3,9 +3,14 @@
 ## Purpose and scope
 
 This document gives an overview of the cybersecurity
-measures implemented in Eve. It covers the Django application, its Saleor
-integration, PostgreSQL, MongoDB, Redis, Celery workers, deployment controls,
-and the supporting development process.
+measures implemented in Eve. It covers the Django application, the versioned
+REST API (`/api/v1/`), its Saleor integration, PostgreSQL, MongoDB, Redis,
+Celery workers, deployment controls, and the supporting development process.
+
+**Last reviewed:** 2026-07-31 against commit `31d9a25` (branch
+`capacity-analysis`). If the assessed commit in
+[THREAT_MODEL.md](THREAT_MODEL.md) is newer than this one, treat this
+document as potentially incomplete and re-review it.
 
 This is an implementation summary, not a claim that the system has no
 remaining risk. The complete risk analysis and accepted risks are documented
@@ -29,7 +34,7 @@ Eve follows four main principles:
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
-| Django password hashing and password validation | Password disclosure and weak passwords | Django's password framework and configured password validators protect stored credentials and reject weak passwords. |
+| Argon2id password hashing with in-place upgrade | Password disclosure and weak passwords | Passwords are hashed with Argon2id, the OWASP-preferred memory-hard hasher. Existing PBKDF2 hashes continue to verify and are transparently upgraded on the owner's next successful login. Configured password validators reject weak passwords. See `PASSWORD_HASHERS` in `eve/settings/base.py`. |
 | Login rate limiting | Automated password guessing | Login requests are limited by client IP using shared Redis state, so the protection works across multiple web instances. See `accounts/views.py` and `core/throttling.py`. |
 | Account lockout | Repeated targeted password guessing | Repeated failures against the same username cause a temporary lockout. The account owner is notified once per lockout window without revealing whether unknown accounts exist. |
 | Administrator TOTP MFA | Stolen administrator passwords | Production administrators can be required to provide a time-based one-time password. See the admin MFA middleware and production settings. |
@@ -38,7 +43,23 @@ Eve follows four main principles:
 | Email verification | Orders associated with unverified addresses | Checkout refuses to place an order until the account email address has been verified. |
 | Case-insensitive unique email addresses | Duplicate identities and account confusion | Registration validation and a database constraint enforce one account per normalized email address. |
 
-## 2. Authorization and privacy
+## 2. REST API authentication and token security
+
+| Implemented measure | What it protects against | Implementation and evidence |
+|---|---|---|
+| Short-lived signed access tokens | Long-lived credential theft and database disclosure | Access tokens are stateless 15-minute tokens produced with Django's `TimestampSigner`, carrying only the user id and a version counter. Nothing is stored server-side, so a database disclosure yields no usable access credential. See `api/tokens.py`. |
+| Hashed, single-use refresh tokens | Refresh-credential disclosure and silent session extension | Refresh tokens are stored as SHA-256 digests of 256-bit random values and rotate on every use: each refresh retires the presented token and issues a new one. |
+| Refresh-token reuse detection | Undetected token theft | Presenting an already-rotated refresh token is treated as evidence of capture: the entire token family is revoked and a security event is logged. |
+| Version-based mass revocation | Inability to revoke stateless tokens | Bumping `token_version` on the user's profile immediately invalidates every outstanding access token for that account. |
+| MFA-enforced token issuance | MFA bypass through the API | An account with a confirmed TOTP device cannot obtain an API token with a password alone; issuance requires a current one-time code. See the token view in `api/v1/views.py`. |
+| Shared lockout across login surfaces | Credential stuffing against the weaker endpoint | The HTML login and the API token endpoint use one lockout implementation (`accounts/services/lockout.py`), so failures against either surface lock the account and notify the owner once per window. |
+| Issuance preconditions and throttles | Automated token-guessing and abuse | Token issuance requires a verified email address and is limited by both a per-IP limit and a scoped DRF throttle (`token` scope). |
+| Scoped API throttling with fail-open logging | API abuse, and silent loss of protection | DRF throttles apply per scope (for example `token`, `checkout`). A cache outage fails open to preserve availability but logs a `throttle_fail_open` event so the loss of protection is visible. See `api/throttling.py`. |
+| User-scoped idempotency keys | Cross-account key collision and key squatting | Client-supplied idempotency keys are hashed together with the user id before any lookup, so one account can never receive or block another account's order. See `scoped_idempotency_key` in `payments/services/checkout.py`. |
+| Uniform authentication failure messages | Username and credential enumeration | Token issuance returns the same error regardless of which part of the credentials was wrong, revealing nothing about whether the account exists. See `api/v1/views.py`. |
+| Code-generated OpenAPI schema and CSP-safe docs | Contract drift and script-injection through documentation pages | The `/api/v1/schema/` document is generated from the code (drf-spectacular), and a test fails the build on any generation warning. Swagger UI and ReDoc serve all assets from the application origin under the strict CSP — no CDN and no inline scripts, with a regression test asserting the docs HTML contains none. |
+
+## 3. Authorization and privacy
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -48,7 +69,7 @@ Eve follows four main principles:
 | Data export and deletion workflows | Failure to support data-subject rights | Management workflows allow an operator to export or delete a user's stored application data in a controlled manner. |
 | Minimal payment-data handling | Exposure of card details | Eve does not store card numbers. Payment processing and authoritative payment state belong to the configured Saleor payment integration. |
 
-## 3. Input validation and injection protection
+## 4. Input validation and injection protection
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -57,9 +78,10 @@ Eve follows four main principles:
 | Fixed MongoDB query structure | NoSQL injection | MongoDB field names and operators are defined by the application; user-controlled values are inserted only as values. |
 | Template autoescaping and upstream sanitization | Cross-site scripting | Django autoescaping is retained. Saleor text is validated and HTML is stripped before caching or rendering. External URLs are limited to HTTP(S). |
 | Quantity validation at multiple layers | Cart and checkout manipulation | Quantities are bounded in forms, views and checkout construction. Invalid or excessive quantities are rejected. |
+| Bounded cart size | Storage abuse and permanent cart breakage | Carts are capped at 50 distinct products (surfaced as `409 cart_full`), preventing a client from growing a cart document toward MongoDB's 16 MB document limit, past which every write to it would fail permanently. |
 | Request-size limits | Memory exhaustion and oversized webhook requests | The edge and application reject bodies above documented limits; oversized Saleor webhook tests expect HTTP 413. |
 
-## 4. Checkout and order integrity
+## 5. Checkout and order integrity
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -70,7 +92,7 @@ Eve follows four main principles:
 | Transactional updates and row locking | Concurrent order-update races | Webhook processing uses database transactions and row-level locking before changing order state. |
 | Reconciliation process | Missing local orders after partial failures | The reconciliation command compares Saleor orders with local records and can recover matched missing orders under operator control. |
 
-## 5. Webhook authenticity and replay resistance
+## 6. Webhook authenticity and replay resistance
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -80,7 +102,7 @@ Eve follows four main principles:
 | Durable receipt before asynchronous processing | Lost events during broker failure | A valid event is committed to PostgreSQL before it is sent to Celery. Recovery jobs requeue durable pending events after broker failure. |
 | Event uniqueness and idempotent processing | Duplicate and replayed delivery | Event identifiers are unique and already-processed events do not repeat a state change. Tests cover duplicate and out-of-order events. |
 
-## 6. Cryptography, transport and key management
+## 7. Cryptography, transport and key management
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -90,7 +112,7 @@ Eve follows four main principles:
 | Public-key webhook validation | Shared webhook-secret exposure | Saleor webhook authenticity uses asymmetric RS256 signatures, so Eve stores public verification keys rather than a shared webhook signing secret. |
 | Secret scanning | Accidental credential commits | Gitleaks runs in CI, and production documentation defines credential-rotation procedures. |
 
-## 7. Browser and HTTP protections
+## 8. Browser and HTTP protections
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -99,8 +121,9 @@ Eve follows four main principles:
 | Clickjacking protection | UI redressing | `X-Frame-Options: DENY` and CSP `frame-ancestors 'none'` prevent the application from being embedded in another site. |
 | Additional security headers | MIME confusion and information leakage | Production sends `X-Content-Type-Options`, a restrictive referrer policy and a Permissions Policy. |
 | Trusted-proxy validation | Spoofed client IP addresses | Client IP headers are honored only from configured proxy networks. Deployment checks fail when the production proxy configuration is missing. |
+| Server-Timing disabled in production | Timing analysis against authentication paths | The `Server-Timing` header, which would hand any client network-noise-free internal timings, is gated on `SERVER_TIMING_ENABLED`: off in production, explicitly on in staging where the load test needs the breakdown. The same measurements remain available in the structured logs. |
 
-## 8. Data-store and cache security
+## 9. Data-store and cache security
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -110,7 +133,7 @@ Eve follows four main principles:
 | Least-privilege MongoDB monitoring | Unnecessary Atlas cluster privileges | Operational telemetry uses database-scoped `dbStats`; the application user does not require the cluster-wide `serverStatus` privilege. |
 | Idempotent MongoDB indexes | Duplicate carts and inefficient lookups | Controlled release steps ensure unique and lookup indexes for carts and cached products. |
 
-## 9. Availability and scalability protections
+## 10. Availability and scalability protections
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -121,7 +144,7 @@ Eve follows four main principles:
 | Health endpoints | Traffic reaching an unhealthy deployment | Liveness reports process availability; readiness verifies PostgreSQL, MongoDB and Redis before a deployment receives traffic. |
 | Controlled migrations and zero-downtime checks | Partially upgraded production state | Railway pre-deploy commands run checks and migrations before activation. Health verification, overlap and draining reduce release interruption. |
 
-## 10. Logging, monitoring and incident response
+## 11. Logging, monitoring and incident response
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -132,7 +155,7 @@ Eve follows four main principles:
 | Backup and restoration checks | Permanent data loss | Production gates require recent backup evidence, encryption and off-site confirmation. Restoration exercises are part of production acceptance. |
 | Credential-rotation procedures | Prolonged exposure after a leaked secret | The operations documentation defines rotation and verification steps for Django, PostgreSQL, MongoDB, Redis and Saleor credentials. |
 
-## 11. Secure development and deployment controls
+## 12. Secure development and deployment controls
 
 | Implemented measure | What it protects against | Implementation and evidence |
 |---|---|---|
@@ -143,7 +166,7 @@ Eve follows four main principles:
 | Fail-closed production settings | Unsafe defaults reaching production | Production validates hosts, trusted origins, TLS endpoints, proxy configuration, environment identity and required secrets during startup. |
 | Required CI checks | Untested changes reaching the deployment branch | Tests, deployment checks, static analysis, dependency audit and secret scanning run on pull requests before merge. |
 
-## 12. Verification summary
+## 13. Verification summary
 
 The controls above are verified through a combination of:
 
@@ -156,7 +179,7 @@ The controls above are verified through a combination of:
 - manual production-acceptance testing for checkout, refund, cancellation and
   signed webhook processing.
 
-## 13. Known limitations and remaining work
+## 14. Known limitations and remaining work
 
 The most important remaining items are:
 
@@ -166,7 +189,11 @@ The most important remaining items are:
   not require public access;
 - the container base image should be pinned by digest and scanned in CI;
 - external provider configuration, backup restoration and credential rotation
-  still require periodic verification.
+  still require periodic verification;
+- mixed-currency cart totals are computed incorrectly but are unreachable with
+  the current single Saleor channel, and cannot misprice an order because
+  checkout recalculates all amounts upstream — tracked as an open item in the
+  threat model rather than fixed.
 
 ## Related documentation
 

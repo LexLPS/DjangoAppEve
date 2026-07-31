@@ -811,3 +811,32 @@ class GunicornSizingTests(TestCase):
         config = self._config()
         self.assertLessEqual(config.workers, 9)
         self.assertGreaterEqual(config.workers, 2)
+
+
+class RateLimitScaleDeployCheckTests(TestCase):
+    """R14: the load-test rate-limit multiplier must never reach production
+    silently. eve.W002 is the control, so it needs its own coverage."""
+
+    def test_warns_when_the_multiplier_is_not_one(self):
+        from .checks import rate_limit_scale_is_production_safe
+
+        with override_settings(RATE_LIMIT_SCALE=100):
+            warnings = rate_limit_scale_is_production_safe(None)
+        self.assertEqual([w.id for w in warnings], ["eve.W002"])
+        self.assertIn("100", warnings[0].msg)
+
+    def test_silent_at_the_default(self):
+        from .checks import rate_limit_scale_is_production_safe
+
+        with override_settings(RATE_LIMIT_SCALE=1):
+            self.assertEqual(rate_limit_scale_is_production_safe(None), [])
+
+    def test_the_multiplier_actually_changes_the_effective_limit(self):
+        # A check that only inspects settings would pass even if the knob
+        # were inert; assert the throttle honours it.
+        from .throttling import _effective_limit
+
+        with override_settings(RATE_LIMIT_SCALE=1):
+            self.assertEqual(_effective_limit(5), 5)
+        with override_settings(RATE_LIMIT_SCALE=100):
+            self.assertEqual(_effective_limit(5), 500)

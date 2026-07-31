@@ -304,7 +304,12 @@ TRUSTED_PROXIES = config("DJANGO_TRUSTED_PROXIES", default="", cast=Csv())
 RATE_LIMIT_SCALE = config("RATE_LIMIT_SCALE", default=1, cast=int)
 
 # API tokens are hashed at rest and expire (threat model R11)
-API_TOKEN_TTL_DAYS = config("API_TOKEN_TTL_DAYS", default=30, cast=int)
+# Access tokens are short-lived and signed; refresh tokens are stored
+# hashed and rotate on every use (api/tokens.py).
+API_ACCESS_TOKEN_TTL_SECONDS = config(
+    "API_ACCESS_TOKEN_TTL_SECONDS", default=900, cast=int  # 15 minutes
+)
+API_REFRESH_TOKEN_TTL_DAYS = config("API_REFRESH_TOKEN_TTL_DAYS", default=30, cast=int)
 
 # Server-Timing exposes per-request app/db/mongo timings to the client.
 # Useful for debugging and for the load test's breakdown; disabled in
@@ -325,7 +330,7 @@ REST_FRAMEWORK = {
     # Token first: it supplies the WWW-Authenticate header, so a bad or
     # missing credential yields 401 (not DRF's session-auth default of 403).
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "api.authentication.HashedTokenAuthentication",
+        "api.authentication.AccessTokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "EXCEPTION_HANDLER": "api.errors.exception_handler",

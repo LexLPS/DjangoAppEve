@@ -7,9 +7,13 @@ payments.services.checkout) — no business logic is reimplemented here.
 import logging
 
 from accounts.models import Profile
+from accounts.services.lockout import clear_failures, is_locked, register_failure
 from core.cache_lock import CacheLeaseUnavailable
+from core.throttling import rate_limit
 from django.conf import settings
 from django.contrib.auth import authenticate
+from django.utils.decorators import method_decorator
+from django_otp import devices_for_user
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from ecommerce.services import cart_service
 from ecommerce.services.catalogue import (
@@ -28,10 +32,16 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from api.authentication import HashedTokenAuthentication
+from api.authentication import AccessTokenAuthentication
 from api.errors import APIError
-from api.models import ApiToken
+from api.models import revoke_all_tokens
 from api.throttling import ScopedRateThrottle
+from api.tokens import (
+    InvalidToken,
+    issue_access_token,
+    issue_refresh_token,
+    rotate_refresh_token,
+)
 
 from .serializers import (
     AddCartItemSerializer,
@@ -41,7 +51,8 @@ from .serializers import (
     ProductListResponseSerializer,
     ProductSerializer,
     ProfileSerializer,
-    TokenIssueResponseSerializer,
+    TokenPairSerializer,
+    TokenRefreshRequestSerializer,
     TokenRequestSerializer,
     UpdateCartItemSerializer,
 )
@@ -355,52 +366,105 @@ def not_found_view(request, *args, **kwargs):
 
 @extend_schema(tags=["account"])
 class TokenView(APIView):
-    """Issue and revoke API tokens.
+    """Issue a short-lived access token plus a rotating refresh token.
 
-    Tokens are stored as SHA-256 digests with an expiry (threat model R11),
-    so a database disclosure cannot yield usable credentials.
+    This endpoint accepts a password, so it carries the same protections as
+    the HTML login rather than a weaker subset:
+
+    * the shared per-username lockout service, so a credential-stuffing run
+      spread across many IPs still locks the targeted account and emails its
+      owner once per window;
+    * the same per-IP rate limit the login form uses, on top of DRF's
+      scoped throttle;
+    * MFA: an account with a confirmed TOTP device must supply a current
+      code, so an API token cannot bypass an admin's second factor;
+    * the email-verification policy applied elsewhere in the product.
     """
 
-    authentication_classes = [SessionAuthentication, HashedTokenAuthentication]
+    authentication_classes = [SessionAuthentication, AccessTokenAuthentication]
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "token"
 
     @extend_schema(
-        summary="Exchange credentials for an API token",
+        summary="Exchange credentials for an access and refresh token",
         request=TokenRequestSerializer,
-        responses={200: TokenIssueResponseSerializer, 400: ERROR, 429: ERROR},
+        responses={200: TokenPairSerializer, 400: ERROR, 401: ERROR,
+                   403: ERROR, 429: ERROR},
     )
+    @method_decorator(rate_limit("api-token", limit=5, window_seconds=300))
     def post(self, request):
         payload = TokenRequestSerializer(data=request.data)
         payload.is_valid(raise_exception=True)
+        username = payload.validated_data["username"]
+
+        if is_locked(username):
+            raise APIError(
+                "account_locked",
+                "Too many failed attempts. Try again later.",
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         user = authenticate(
             request,
-            username=payload.validated_data["username"],
+            username=username,
             password=payload.validated_data["password"],
         )
         if user is None or not user.is_active:
+            register_failure(username)
             # Uniform failure: no signal about which part was wrong
             raise APIError(
                 "invalid_credentials", "Incorrect username or password.",
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        token, raw_token = ApiToken.issue(user, label=request.headers.get("User-Agent", ""))
+        # A second factor that guards the admin must guard the API too,
+        # or a password alone reissues equivalent access.
+        devices = list(devices_for_user(user, confirmed=True))
+        if devices:
+            otp_code = (payload.validated_data.get("otp") or "").strip()
+            if not otp_code:
+                raise APIError(
+                    "otp_required",
+                    "This account requires a one-time code.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+            if not any(device.verify_token(otp_code) for device in devices):
+                register_failure(username)
+                raise APIError(
+                    "otp_invalid", "Incorrect one-time code.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+
+        profile, _ = Profile.objects.get_or_create(user=user)
+        if not profile.email_verified:
+            raise APIError(
+                "email_not_verified",
+                "Verify your email address before using the API.",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+
+        clear_failures(username)
+        access, expires_in = issue_access_token(user)
+        _, refresh = issue_refresh_token(
+            user, user_agent=request.headers.get("User-Agent", "")
+        )
         logger.info(
             "API token issued",
-            extra={"event": "api_token_issued", "token_id": token.pk},
+            extra={"event": "api_token_issued", "user_id": user.pk},
         )
-        return Response(
-            {"token": raw_token, "expires_at": token.expires_at},
-            status=status.HTTP_200_OK,
-        )
+        return Response({
+            "access": access,
+            "refresh": refresh,
+            "expires_in": expires_in,
+            "token_type": "Token",
+        })
 
     @extend_schema(
-        summary="Revoke tokens",
+        summary="Revoke every token for the account",
         description=(
-            "Revokes the token used for this request, or every token for the "
-            "account when authenticated with a session."
+            "Invalidates all outstanding access tokens (by bumping the "
+            "account's token version) and every refresh token."
         ),
         request=None,
         responses={204: None, 401: ERROR},
@@ -408,15 +472,53 @@ class TokenView(APIView):
     def delete(self, request):
         if not request.user.is_authenticated:
             raise APIError(
-                "authentication_required", "Authentication credentials were not provided.",
+                "authentication_required",
+                "Authentication credentials were not provided.",
                 status_code=status.HTTP_401_UNAUTHORIZED,
             )
-        if isinstance(request.auth, ApiToken):
-            deleted = ApiToken.objects.filter(pk=request.auth.pk).delete()[0]
-        else:
-            deleted = ApiToken.objects.filter(user=request.user).delete()[0]
+        revoked = revoke_all_tokens(request.user)
         logger.info(
             "API tokens revoked",
-            extra={"event": "api_token_revoked", "count": deleted},
+            extra={"event": "api_token_revoked", "refresh_revoked": revoked},
         )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+@extend_schema(tags=["account"])
+class TokenRefreshView(APIView):
+    """Rotate a refresh token for a fresh pair.
+
+    Every refresh retires the presented token. Replaying a retired one is
+    treated as theft: the whole token family is revoked rather than the
+    session silently continuing.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "token"
+
+    @extend_schema(
+        summary="Rotate a refresh token",
+        request=TokenRefreshRequestSerializer,
+        responses={200: TokenPairSerializer, 400: ERROR, 401: ERROR, 429: ERROR},
+    )
+    def post(self, request):
+        payload = TokenRefreshRequestSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        try:
+            user, refresh = rotate_refresh_token(payload.validated_data["refresh"])
+        except InvalidToken:
+            raise APIError(
+                "invalid_refresh_token",
+                "That refresh token is not valid. Sign in again.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            ) from None
+
+        access, expires_in = issue_access_token(user)
+        return Response({
+            "access": access,
+            "refresh": refresh,
+            "expires_in": expires_in,
+            "token_type": "Token",
+        })

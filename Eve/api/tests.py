@@ -8,7 +8,8 @@ from django.test import TestCase, override_settings
 from payments.models import Order
 from payments.services.saleor_checkout import CheckoutError
 
-from api.models import ApiToken, hash_token
+from api.models import RefreshToken
+from api.tokens import hash_refresh_token, issue_access_token
 
 
 def make_product(**overrides):
@@ -102,7 +103,7 @@ class AuthenticationTests(ApiTestCase):
         self.assertIn("Token", response["WWW-Authenticate"])
 
     def test_token_auth_works_for_non_browser_clients(self):
-        _, token_key = ApiToken.issue(self.user)
+        token_key, _ = issue_access_token(self.user)
         with patch("api.v1.views.cart_service.get_cart", return_value=make_cart(self.user.id)):
             response = self.client.get(
                 "/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {token_key}"
@@ -121,7 +122,10 @@ class AuthenticationTests(ApiTestCase):
             {"username": "alice", "password": "S3curePass!x"},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["token"])
+        # Issuance now returns a short-lived access token plus a refresh
+        body = response.json()
+        self.assertTrue(body["access"])
+        self.assertTrue(body["refresh"])
 
     def test_token_endpoint_rejects_bad_credentials(self):
         response = self.client.post(
@@ -546,81 +550,6 @@ class IdempotencyKeyScopingTests(ApiTestCase):
         )
 
 
-class ApiTokenSecurityTests(ApiTestCase):
-    """R11: tokens must be unusable from a database disclosure and must
-    expire."""
-
-    def test_only_a_digest_is_stored(self):
-        token, raw = ApiToken.issue(self.user)
-        self.assertNotIn(raw, ApiToken.objects.values_list("token_hash", flat=True))
-        self.assertEqual(token.token_hash, hash_token(raw))
-        self.assertEqual(len(token.token_hash), 64)
-        # Nothing anywhere on the row reveals the raw value
-        self.assertNotIn(raw, str(token.__dict__))
-
-    def test_issued_token_authenticates_and_records_use(self):
-        _, raw = ApiToken.issue(self.user)
-        with patch("api.v1.views.cart_service.get_cart", return_value=make_cart(self.user.id)):
-            response = self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
-        self.assertEqual(response.status_code, 200)
-        self.assertIsNotNone(ApiToken.objects.get().last_used_at)
-
-    def test_expired_token_is_rejected(self):
-        from django.utils import timezone
-
-        token, raw = ApiToken.issue(self.user)
-        token.expires_at = timezone.now() - timezone.timedelta(seconds=1)
-        token.save(update_fields=["expires_at"])
-        response = self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
-        self.assertEqual(response.status_code, 401)
-        self.assertEqual(response.json()["error"]["code"], "authentication_failed")
-
-    def test_token_of_an_inactive_user_is_rejected(self):
-        _, raw = ApiToken.issue(self.user)
-        self.user.is_active = False
-        self.user.save(update_fields=["is_active"])
-        response = self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
-        self.assertEqual(response.status_code, 401)
-
-    def test_issue_endpoint_returns_the_raw_token_once_with_an_expiry(self):
-        response = self.client.post(
-            "/api/v1/auth/token/",
-            {"username": "alice", "password": "S3curePass!x"},
-        )
-        self.assertEqual(response.status_code, 200)
-        body = response.json()
-        self.assertTrue(body["token"])
-        self.assertTrue(body["expires_at"])
-        # The stored row holds the digest of what was returned, not the value
-        self.assertEqual(ApiToken.objects.get().token_hash, hash_token(body["token"]))
-
-    def test_revoking_with_a_token_removes_only_that_token(self):
-        _, keep = ApiToken.issue(self.user)
-        _, revoke = ApiToken.issue(self.user)
-        response = self.client.delete(
-            "/api/v1/auth/token/", HTTP_AUTHORIZATION=f"Token {revoke}"
-        )
-        self.assertEqual(response.status_code, 204)
-        remaining = list(ApiToken.objects.values_list("token_hash", flat=True))
-        self.assertEqual(remaining, [hash_token(keep)])
-
-    def test_revoking_with_a_session_removes_every_token(self):
-        ApiToken.issue(self.user)
-        ApiToken.issue(self.user)
-        self.client.force_login(self.user)
-        response = self.client.delete("/api/v1/auth/token/")
-        self.assertEqual(response.status_code, 204)
-        self.assertEqual(ApiToken.objects.count(), 0)
-
-    def test_one_users_token_cannot_reach_another_users_data(self):
-        mallory = User.objects.create_user("mallory", "m@example.com", "S3curePass!x")
-        _, raw = ApiToken.issue(mallory)
-        with patch("api.v1.views.cart_service.get_cart") as get_cart:
-            get_cart.return_value = make_cart(mallory.id, items=[])
-            self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
-        get_cart.assert_called_once_with(mallory.id)
-
-
 class ServerTimingExposureTests(ApiTestCase):
     """R13: the timing side channel must be off in production."""
 
@@ -672,3 +601,218 @@ class ThrottleFailOpenTests(ApiTestCase):
         ), self.assertLogs("api.throttling", level="ERROR") as captured:
             self.assertTrue(throttle.allow_request(None, None))
         self.assertEqual(captured.records[0].event, "throttle_fail_open")
+
+
+class TokenIssueHardeningTests(ApiTestCase):
+    """The token endpoint accepts a password, so it must carry the same
+    protections as the HTML login - not a weaker subset."""
+
+    def _post(self, password="S3curePass!x", **extra):
+        return self.client.post(
+            "/api/v1/auth/token/",
+            {"username": "alice", "password": password, **extra},
+            content_type="application/json",
+        )
+
+    def test_valid_credentials_return_an_access_and_refresh_pair(self):
+        body = self._post().json()
+        self.assertTrue(body["access"])
+        self.assertTrue(body["refresh"])
+        self.assertEqual(body["token_type"], "Token")
+        self.assertEqual(body["expires_in"], 900)
+
+    def test_brute_force_locks_the_account_across_many_ips(self):
+        # A distributed run never trips a per-IP throttle; the per-username
+        # lockout is what stops it.
+        for i in range(10):
+            response = self.client.post(
+                "/api/v1/auth/token/",
+                {"username": "alice", "password": "wrong"},
+                content_type="application/json",
+                REMOTE_ADDR=f"198.51.100.{i}",
+            )
+            self.assertEqual(response.status_code, 400)
+
+        # Even the CORRECT password is now refused, from a fresh IP
+        response = self.client.post(
+            "/api/v1/auth/token/",
+            {"username": "alice", "password": "S3curePass!x"},
+            content_type="application/json",
+            REMOTE_ADDR="203.0.113.99",
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.json()["error"]["code"], "account_locked")
+
+    def test_lockout_is_shared_with_the_html_login(self):
+        # Failures against the API must lock the browser login too, and
+        # notify the owner exactly once.
+        from django.core import mail
+
+        for i in range(10):
+            self.client.post(
+                "/api/v1/auth/token/",
+                {"username": "alice", "password": "wrong"},
+                content_type="application/json",
+                REMOTE_ADDR=f"198.51.100.{i}",
+            )
+        response = self.client.post(
+            "/accounts/login/",
+            {"username": "alice", "password": "S3curePass!x"},
+            REMOTE_ADDR="203.0.113.50",
+        )
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(len([m for m in mail.outbox if "locked" in m.subject]), 1)
+
+    def test_per_ip_rate_limit_applies_to_token_issuance(self):
+        for _ in range(5):
+            self.client.post(
+                "/api/v1/auth/token/",
+                {"username": "bob", "password": "wrong"},
+                content_type="application/json",
+            )
+        response = self.client.post(
+            "/api/v1/auth/token/",
+            {"username": "bob", "password": "wrong"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 429)
+
+    def test_successful_login_clears_the_failure_count(self):
+        from accounts.services.lockout import is_locked
+
+        for i in range(3):
+            self.client.post(
+                "/api/v1/auth/token/",
+                {"username": "alice", "password": "wrong"},
+                content_type="application/json",
+                REMOTE_ADDR=f"198.51.100.{i}",
+            )
+        self.assertEqual(self._post().status_code, 200)
+        self.assertFalse(is_locked("alice"))
+
+    def test_unverified_email_cannot_obtain_a_token(self):
+        Profile.objects.filter(user=self.user).update(email_verified=False)
+        response = self._post()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "email_not_verified")
+
+    def test_mfa_account_requires_a_one_time_code(self):
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        TOTPDevice.objects.create(user=self.user, name="default", confirmed=True)
+        response = self._post()
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "otp_required")
+
+    def test_mfa_account_rejects_a_wrong_one_time_code(self):
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        TOTPDevice.objects.create(user=self.user, name="default", confirmed=True)
+        response = self._post(otp="000000")
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "otp_invalid")
+
+    def test_mfa_account_succeeds_with_a_valid_code(self):
+        from django_otp.oath import totp
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        device = TOTPDevice.objects.create(user=self.user, name="default", confirmed=True)
+        code = totp(device.bin_key, device.step, device.t0, device.digits, device.drift)
+        response = self._post(otp=str(code).zfill(device.digits))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["access"])
+
+
+class AccessTokenTests(ApiTestCase):
+    """Access tokens are signed and short-lived; nothing is stored."""
+
+    def test_access_token_is_not_persisted_anywhere(self):
+        access, _ = issue_access_token(self.user)
+        self.assertEqual(RefreshToken.objects.filter(token_hash=access).count(), 0)
+
+    def test_tampered_token_is_rejected(self):
+        access, _ = issue_access_token(self.user)
+        response = self.client.get(
+            "/api/v1/profile/", HTTP_AUTHORIZATION=f"Token {access[:-2]}xy"
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_expired_access_token_is_rejected(self):
+        access, _ = issue_access_token(self.user)
+        with override_settings(API_ACCESS_TOKEN_TTL_SECONDS=-1):
+            response = self.client.get(
+                "/api/v1/profile/", HTTP_AUTHORIZATION=f"Token {access}"
+            )
+        self.assertEqual(response.status_code, 401)
+
+    def test_revocation_invalidates_outstanding_access_tokens(self):
+        from api.models import revoke_all_tokens
+
+        access, _ = issue_access_token(self.user)
+        self.assertEqual(
+            self.client.get(
+                "/api/v1/profile/", HTTP_AUTHORIZATION=f"Token {access}"
+            ).status_code,
+            200,
+        )
+        revoke_all_tokens(self.user)
+        self.assertEqual(
+            self.client.get(
+                "/api/v1/profile/", HTTP_AUTHORIZATION=f"Token {access}"
+            ).status_code,
+            401,
+        )
+
+
+class RefreshTokenRotationTests(ApiTestCase):
+    def _login(self):
+        return self.client.post(
+            "/api/v1/auth/token/",
+            {"username": "alice", "password": "S3curePass!x"},
+            content_type="application/json",
+        ).json()
+
+    def _refresh(self, token):
+        return self.client.post(
+            "/api/v1/auth/token/refresh/",
+            {"refresh": token},
+            content_type="application/json",
+        )
+
+    def test_refresh_returns_a_new_pair_and_retires_the_old_token(self):
+        first = self._login()
+        response = self._refresh(first["refresh"])
+        self.assertEqual(response.status_code, 200)
+        second = response.json()
+        self.assertNotEqual(second["refresh"], first["refresh"])
+        self.assertTrue(second["access"])
+
+    def test_only_refresh_tokens_are_stored_and_only_as_digests(self):
+        body = self._login()
+        stored = RefreshToken.objects.get(used_at__isnull=True)
+        self.assertEqual(stored.token_hash, hash_refresh_token(body["refresh"]))
+        self.assertNotIn(body["refresh"], stored.token_hash)
+
+    def test_replaying_a_rotated_token_revokes_the_whole_family(self):
+        first = self._login()
+        second = self._refresh(first["refresh"]).json()
+
+        # The stolen (already rotated) token is replayed
+        replay = self._refresh(first["refresh"])
+        self.assertEqual(replay.status_code, 401)
+        self.assertEqual(replay.json()["error"]["code"], "invalid_refresh_token")
+
+        # ...and the legitimate client's token is revoked too: theft ends
+        # the session rather than letting it continue silently.
+        self.assertEqual(self._refresh(second["refresh"]).status_code, 401)
+
+    def test_unknown_refresh_token_is_rejected(self):
+        self.assertEqual(self._refresh("not-a-real-token").status_code, 401)
+
+    def test_revoking_invalidates_refresh_tokens(self):
+        body = self._login()
+        response = self.client.delete(
+            "/api/v1/auth/token/", HTTP_AUTHORIZATION=f"Token {body['access']}"
+        )
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(self._refresh(body["refresh"]).status_code, 401)

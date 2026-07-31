@@ -52,12 +52,29 @@ curl -X POST https://<host>/api/v1/auth/token/ \
   -d '{"username": "...", "password": "..."}'
 ```
 
-Tokens **expire** (30 days by default, `API_TOKEN_TTL_DAYS`) and are stored
-only as SHA-256 digests, so a database disclosure cannot yield usable
-credentials. The raw value is returned exactly once at issuance and cannot
-be recovered afterwards. Revoke with `DELETE /api/v1/auth/token/`: sending
-the token revokes that token; authenticating with a session revokes every
-token on the account. Issuance is throttled to 10 requests/minute. Everything except the public catalogue requires
+Issuance returns a **short-lived access token** (15 minutes) plus a
+**refresh token**:
+
+```json
+{"access": "...", "refresh": "...", "expires_in": 900, "token_type": "Token"}
+```
+
+Send the access token as `Authorization: Token <access>`. When it expires,
+exchange the refresh token at `POST /api/v1/auth/token/refresh/` for a new
+pair. **Refresh tokens are single use**: each refresh rotates them, and
+replaying a retired one is treated as theft — the whole token family is
+revoked and you must sign in again.
+
+The endpoint carries the same protections as the browser login: a per-IP
+rate limit, a per-username lockout shared with the login form (which emails
+the owner), a required one-time code for accounts with MFA (send it as
+`otp`), and a verified email address. Revoke everything with
+`DELETE /api/v1/auth/token/`.
+
+Access tokens are signed rather than stored, so a database disclosure
+yields no usable credential; refresh tokens are stored only as digests.
+
+Everything except the public catalogue requires
 authentication; unauthenticated requests get `401` with
 `WWW-Authenticate: Token`.
 
@@ -84,7 +101,9 @@ Codes: `validation_error`, `authentication_required`, `authentication_failed`,
 `permission_denied`, `not_found`, `method_not_allowed`, `rate_limited`,
 `product_not_found`, `cart_item_not_found`, `catalogue_unavailable`,
 `checkout_disabled`, `checkout_failed`, `checkout_in_progress`,
-`checkout_unavailable`, `email_not_verified`, `idempotency_key_required`.
+`checkout_unavailable`, `email_not_verified`, `idempotency_key_required`,
+`invalid_credentials`, `account_locked`, `otp_required`, `otp_invalid`,
+`invalid_refresh_token`, `cart_full`.
 
 ## Endpoints
 
@@ -101,7 +120,9 @@ Codes: `validation_error`, `authentication_required`, `authentication_failed`,
 | `GET` | `/orders/` | user | Paginated order history (own orders only) |
 | `GET` | `/orders/{saleor_order_id}/` | user | Single order |
 | `GET` | `/profile/` | user | Account profile |
-| `POST` | `/auth/token/` | public | Exchange credentials for a token |
+| `POST` | `/auth/token/` | public | Exchange credentials for an access + refresh pair |
+| `POST` | `/auth/token/refresh/` | public | Rotate a refresh token |
+| `DELETE` | `/auth/token/` | user | Revoke every token for the account |
 
 Carts and orders are always resolved from the authenticated identity; no
 endpoint accepts a user id, so one client cannot address another's data.

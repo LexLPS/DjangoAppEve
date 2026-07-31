@@ -185,6 +185,10 @@ class ProductListResponseSerializer(serializers.Serializer):
 class TokenRequestSerializer(serializers.Serializer):
     username = serializers.CharField()
     password = serializers.CharField(style={"input_type": "password"})
+    otp = serializers.CharField(
+        required=False, allow_blank=True,
+        help_text="Required when the account has a confirmed TOTP device.",
+    )
 
 
 class TokenResponseSerializer(serializers.Serializer):
@@ -196,3 +200,18 @@ class TokenIssueResponseSerializer(serializers.Serializer):
 
     token = serializers.CharField(help_text="Store this now; it is never shown again.")
     expires_at = serializers.DateTimeField()
+
+
+class TokenPairSerializer(serializers.Serializer):
+    """Issued on login and on every refresh; store both values securely."""
+
+    access = serializers.CharField(
+        help_text="Short-lived; send as Authorization: Token <access>."
+    )
+    refresh = serializers.CharField(help_text="Single use: rotates on every refresh.")
+    expires_in = serializers.IntegerField(help_text="Access token lifetime in seconds.")
+    token_type = serializers.CharField()
+
+
+class TokenRefreshRequestSerializer(serializers.Serializer):
+    refresh = serializers.CharField()

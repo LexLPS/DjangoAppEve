@@ -1,26 +1,23 @@
-"""Bearer-token authentication backed by hashed, expiring tokens.
+"""Bearer authentication for short-lived signed access tokens.
 
-Wire-compatible with DRF's `TokenAuthentication` (`Authorization: Token
-<key>`), so existing clients need no change, but the stored credential is a
-digest with an expiry rather than a plaintext value that lives forever.
+Wire format is unchanged (`Authorization: Token <access-token>`), but the
+credential is now a signed, 15-minute token rather than a database row that
+lives for weeks. Nothing is looked up per request except the user, and a
+`token_version` bump revokes every outstanding token at once.
 """
 import logging
-from datetime import timedelta
 
-from django.utils import timezone
 from drf_spectacular.extensions import OpenApiAuthenticationExtension
 from rest_framework import authentication, exceptions
 
-from .models import ApiToken, hash_token
+from .tokens import InvalidToken, read_access_token
 
 logger = logging.getLogger(__name__)
 
 KEYWORD = "Token"
-# Avoid a database write on every authenticated request
-LAST_USED_RESOLUTION = timedelta(hours=1)
 
 
-class HashedTokenAuthentication(authentication.BaseAuthentication):
+class AccessTokenAuthentication(authentication.BaseAuthentication):
     def authenticate(self, request):
         header = authentication.get_authorization_header(request).split()
         if not header or header[0].lower() != KEYWORD.lower().encode():
@@ -33,43 +30,29 @@ class HashedTokenAuthentication(authentication.BaseAuthentication):
         except UnicodeError:
             raise exceptions.AuthenticationFailed("Malformed token.") from None
 
-        token = (
-            ApiToken.objects.select_related("user")
-            .filter(token_hash=hash_token(raw_token))
-            .first()
-        )
-        # Same message either way: never reveal whether a token exists
-        if token is None or token.is_expired:
-            if token is not None:
-                logger.info(
-                    "Expired API token presented",
-                    extra={"event": "api_token_expired", "token_id": token.pk},
-                )
-            raise exceptions.AuthenticationFailed("Invalid or expired token.")
+        try:
+            user = read_access_token(raw_token)
+        except InvalidToken as exc:
+            # One message for every failure mode: never reveal whether a
+            # token existed, expired, or was revoked
+            logger.info(
+                "Access token rejected",
+                extra={"event": "access_token_rejected", "reason": str(exc)},
+            )
+            raise exceptions.AuthenticationFailed("Invalid or expired token.") from None
 
-        if not token.user.is_active:
-            raise exceptions.AuthenticationFailed("Invalid or expired token.")
-
-        now = timezone.now()
-        if token.last_used_at is None or now - token.last_used_at > LAST_USED_RESOLUTION:
-            ApiToken.objects.filter(pk=token.pk).update(last_used_at=now)
-
-        return (token.user, token)
+        return (user, raw_token)
 
     def authenticate_header(self, request):
-        # Drives the 401 (rather than 403) on missing/!invalid credentials
+        # Drives 401 (rather than 403) on missing/invalid credentials
         return KEYWORD
 
 
-class HashedTokenScheme(OpenApiAuthenticationExtension):
-    """Teaches drf-spectacular how to document this scheme.
+class AccessTokenScheme(OpenApiAuthenticationExtension):
+    """Teaches drf-spectacular how to document this scheme; without it the
+    generator omits the security scheme from the published contract."""
 
-    Without it the generator emits 'could not resolve authenticator' and
-    silently omits the security scheme, so the published contract would not
-    tell clients how to authenticate.
-    """
-
-    target_class = "api.authentication.HashedTokenAuthentication"
+    target_class = "api.authentication.AccessTokenAuthentication"
     name = "TokenAuth"
 
     def get_security_definition(self, auto_schema):
@@ -78,8 +61,8 @@ class HashedTokenScheme(OpenApiAuthenticationExtension):
             "in": "header",
             "name": "Authorization",
             "description": (
-                "Bearer token obtained from `/api/v1/auth/token/`, sent as "
-                "`Authorization: Token <key>`. Tokens expire and are stored "
-                "only as digests."
+                "Short-lived access token from `/api/v1/auth/token/`, sent as "
+                "`Authorization: Token <access>`. Expires in 15 minutes; use "
+                "`/api/v1/auth/token/refresh/` to rotate."
             ),
         }

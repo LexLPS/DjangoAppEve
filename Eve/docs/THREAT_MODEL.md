@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| **Assessed commit** | `94a7b8c` (+ this change) |
+| **Assessed commit** | `db16be2` |
 | **Branch** | `capacity-analysis` |
 | **Assessment date** | 2026-07-31 |
 | **Test suite at that commit** | 258 tests, 256 passing, 2 skipped (Saleor integration, requires a live instance) |

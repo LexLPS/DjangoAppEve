@@ -4,7 +4,6 @@ Versioned in the path (`/api/v1/`) so a future v2 can change response
 shapes without breaking clients pinned to v1.
 """
 from django.urls import include, path, re_path
-from rest_framework.authtoken import views as authtoken_views
 from rest_framework.routers import DefaultRouter
 
 from .docs import RedocView, SchemaView, SwaggerView
@@ -16,6 +15,7 @@ from .views import (
     OrderViewSet,
     ProductViewSet,
     ProfileView,
+    TokenView,
     not_found_view,
 )
 
@@ -33,7 +33,7 @@ urlpatterns = [
 
     # Token exchange for non-browser clients (mobile, server-to-server).
     # Browsers keep using session auth + CSRF.
-    path("auth/token/", authtoken_views.obtain_auth_token, name="obtain-token"),
+    path("auth/token/", TokenView.as_view(), name="obtain-token"),
 
     path("cart/", CartView.as_view(), name="cart"),
     path("cart/items/", CartItemsView.as_view(), name="cart-items"),

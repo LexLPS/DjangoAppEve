@@ -98,6 +98,9 @@ CACHES = {
 if SALEOR_JWKS_URL and not SALEOR_JWKS_URL.startswith("https://"):
     raise ImproperlyConfigured("SALEOR_JWKS_URL must be an https:// URL in production.")
 
+# No timing side channel for the public (threat model R13)
+SERVER_TIMING_ENABLED = config("SERVER_TIMING_ENABLED", default=False, cast=bool)
+
 # Admin MFA is on by default in production
 ADMIN_REQUIRE_MFA = config("DJANGO_ADMIN_REQUIRE_MFA", default=True, cast=bool)
 

@@ -7,7 +7,7 @@
 | **Assessed commit** | `0b591a6` |
 | **Branch** | `capacity-analysis` |
 | **Assessment date** | 2026-07-31 |
-| **Test suite at that commit** | 233 tests, 231 passing, 2 skipped (Saleor integration, requires a live instance) |
+| **Test suite at that commit** | 244 tests, 242 passing, 2 skipped (Saleor integration, requires a live instance) |
 
 **In scope:** the Django application (storefront, REST API v1, Celery
 tasks), its three data stores, the Saleor integration (GraphQL egress and
@@ -141,7 +141,7 @@ Base image not digest-pinned, no container scan **(A**, R8**)**.
 | A04 | Insecure Design | **V + A** | V: fail-closed settings selection, idempotent checkout with a durable journal, allow-listed order transitions, circuit breaker (`CheckoutFlowTests`, `WebhookTests`, `SaleorClientResilienceTests`). A: no payment-capture step exists yet (R6); lockout is abusable against a victim (R5). |
 | A05 | Security Misconfiguration | **C** | `check --deploy` passes at `--fail-level WARNING` with custom checks `eve.W001` (trusted proxies) and `eve.W002` (rate-limit scale), and CI runs it (`TrustedProxyDeployCheckTests`, `LoadTestConfigurationTests`). But this category is **inherently config-dependent**: correct behaviour requires `DJANGO_TRUSTED_PROXIES`, `DJANGO_ALLOWED_HOSTS`, TLS backend URLs and secrets to be right in the environment. Code cannot guarantee it; the deploy check only refuses the most dangerous omissions. |
 | A06 | Vulnerable & Outdated Components | **V + D** | V: full pinned closure, `pip check` and `pip-audit` gated in CI; 12 CVEs remediated this cycle. D: monthly audit cadence is a documented procedure; base image pinning and container scanning are not implemented (R8). |
-| A07 | Identification & Authentication Failures | **V + C + A** | V: session rotation on login (`SessionFixationTests`), POST-only CSRF logout (`LogoutTests`), per-IP throttle plus cross-IP username lockout (`AccountLockoutTests`), no-enumeration password reset (`PasswordResetTests`), Argon2id (`PasswordHashingTests`), unique email (`AuthenticationTests`). C: admin MFA depends on `ADMIN_REQUIRE_MFA` and provisioned devices. A: API tokens never expire and are stored unhashed (R11); Argon2 memory cost is a DoS surface (R12). |
+| A07 | Identification & Authentication Failures | **V + C + A** | V: session rotation on login (`SessionFixationTests`), POST-only CSRF logout (`LogoutTests`), per-IP throttle plus cross-IP username lockout (`AccountLockoutTests`), no-enumeration password reset (`PasswordResetTests`), Argon2id (`PasswordHashingTests`), unique email (`AuthenticationTests`). C: admin MFA depends on `ADMIN_REQUIRE_MFA` and provisioned devices. A: Argon2 memory cost is a DoS surface (R12). API tokens are now hashed and expiring (R11, fixed). |
 | A08 | Software & Data Integrity Failures | **V + C** | V: signed webhooks, locked dependencies, secret scanning, no client-side integrity assumptions. C: CI gates only block merges if branch protection is configured in GitHub — an external setting this repository cannot enforce. |
 | A09 | Security Logging & Monitoring Failures | **V + D** | V: structured JSON logs with correlation IDs, redaction filters, scrubbed exception blocks, auth/webhook/circuit events (`LogRedactionTests`, `ObservabilityTests`). D: alert routing, paging thresholds and SLOs are documented in OBSERVABILITY.md; nothing in code proves an alert reaches a human. |
 | A10 | SSRF | **V** | Only two operator-configured HTTPS origins are fetched (Saleor GraphQL, JWKS); no user-supplied URL is ever fetched server-side. Upstream URLs are rendered browser-side only after http(s) validation (`ExternalUrlSanitizationTests`). |
@@ -215,13 +215,17 @@ added. Fix by grouping totals per currency or refusing mixed carts.
 New concerns, including two introduced by recent performance work. None is
 currently exploited; all are recorded rather than quietly accepted.
 
-**R11 — API tokens do not expire and are stored unhashed.** DRF's
-`authtoken` keeps the token value in plaintext in PostgreSQL and has no
-expiry. A database read (backup, log, or SQL injection elsewhere) yields
-working credentials indefinitely. Impact: medium. Recommendation: move to
-short-lived JWTs with refresh, or hash tokens at rest and add expiry plus a
-revocation endpoint. Documented as a trade-off in docs/API.md; now tracked
-as a risk.
+**R11 — API tokens do not expire and are stored unhashed. FIXED
+2026-07-31.** DRF's `authtoken` kept the token value in plaintext with no
+expiry, so any database read yielded working credentials indefinitely.
+Replaced with `api.models.ApiToken`: 256 bits of entropy, stored only as a
+SHA-256 digest, expiring after `API_TOKEN_TTL_DAYS` (default 30), with a
+revocation endpoint (`DELETE /api/v1/auth/token/` — the presented token, or
+every token when authenticated by session) and a `10/min` throttle on
+issuance. The plaintext `authtoken_token` table is dropped by migration
+`api.0002`, deliberately destroying any tokens it held. Assurance: **V**
+(`ApiTokenSecurityTests` — digest-only storage, expiry, inactive user,
+per-token and account-wide revocation, cross-account isolation).
 
 **R12 — Argon2 memory cost is a denial-of-service surface.** The Argon2id
 switch (a security improvement, and a 10× latency win) makes each hash cost
@@ -232,14 +236,15 @@ fully mitigated. Impact: medium. Recommendation: alert on memory during
 login bursts; keep thread count in the memory budget; do **not** weaken the
 Argon2 parameters to compensate.
 
-**R13 — `Server-Timing` exposes precise server-side timings.** The
-observability work added `app;dur`, `db;dur` and `mongo;dur` to every
-response. This is genuinely useful, but it hands any client
-network-noise-free timing data, which lowers the cost of timing analysis
-against authentication paths. Django already equalises login timing for
-unknown users, so no enumeration oracle is known today. Impact: low.
-Recommendation: strip the header in production, or emit it only for staff
-sessions or a debug flag.
+**R13 — `Server-Timing` exposes precise server-side timings. FIXED
+2026-07-31.** The header handed any client network-noise-free timing data,
+lowering the cost of timing analysis against authentication paths. It is
+now gated on `SERVER_TIMING_ENABLED`, which defaults to **False in
+production** and is re-enabled explicitly in staging, where the load test
+needs the breakdown and traffic is internal. The same numbers remain in the
+structured logs in every environment. Assurance: **V**
+(`ServerTimingExposureTests`, including an assertion on the default that
+production actually ships).
 
 **R14 — `RATE_LIMIT_SCALE` can multiply every per-IP limit.** Added for
 load testing. A deploy check (`eve.W002`) fails the release if it is ever
@@ -286,9 +291,9 @@ state was found. Assurance: **V** for the timer (`ObservabilityTests`),
 | R8 | Base image not digest-pinned; no container scan | Open | **A** |
 | R9 | Email verification not enforced | Fixed — checkout requires it | **V** |
 | R10 | Multiple accounts per email address | Fixed — form + partial unique index | **V** |
-| R11 | API tokens unhashed and non-expiring | Open (new) | **A** pending decision |
+| R11 | API tokens unhashed and non-expiring | Fixed — hashed, expiring, revocable | **V** |
 | R12 | Argon2 memory as a DoS surface | Open (new) | **D** monitoring |
-| R13 | `Server-Timing` timing exposure | Open (new) | **A** low severity |
+| R13 | `Server-Timing` timing exposure | Fixed — off in production | **V** |
 | R14 | `RATE_LIMIT_SCALE` weakens throttles | Mitigated — `eve.W002` | **V** check / **C** CI gate |
 | R15 | Load-test JWKS key injection | Mitigated — prod guard, TTL | **V** guard / **D** access control |
 
@@ -309,7 +314,7 @@ state was found. Assurance: **V** for the timer (`ObservabilityTests`),
 ## 10. How to re-verify these claims
 
 ```bash
-python manage.py test --settings=eve.settings.test   # 233 tests
+python manage.py test --settings=eve.settings.test   # 244 tests
 ```
 
 ```bash

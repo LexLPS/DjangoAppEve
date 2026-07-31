@@ -109,14 +109,21 @@ class RequestMetricsMiddleware:
         # Standard Server-Timing header: lets any client (browser devtools,
         # the load generator) separate time spent *in the application* from
         # time spent queueing or on the network, without log access.
-        timings = [
-            f"app;dur={duration_ms}",
-            f"db;dur={payload['db_ms']}",
-            f"mongo;dur={mongo_ms}",
-        ]
-        if queue_ms is not None:
-            timings.append(f"queue;dur={queue_ms}")
-        response.headers["Server-Timing"] = ", ".join(timings)
+        #
+        # Off in production (threat model R13): it hands anyone
+        # network-noise-free timings, which lowers the cost of timing
+        # analysis against authentication paths. Staging re-enables it so
+        # the load test keeps its breakdown; the same numbers are always
+        # available in the logs regardless.
+        if settings.SERVER_TIMING_ENABLED:
+            timings = [
+                f"app;dur={duration_ms}",
+                f"db;dur={payload['db_ms']}",
+                f"mongo;dur={mongo_ms}",
+            ]
+            if queue_ms is not None:
+                timings.append(f"queue;dur={queue_ms}")
+            response.headers["Server-Timing"] = ", ".join(timings)
         request_logger.log(
             level,
             "%s %s -> %d in %sms",

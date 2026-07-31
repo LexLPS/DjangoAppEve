@@ -9,6 +9,7 @@ import logging
 from accounts.models import Profile
 from core.cache_lock import CacheLeaseUnavailable
 from django.conf import settings
+from django.contrib.auth import authenticate
 from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_view
 from ecommerce.services import cart_service
 from ecommerce.services.catalogue import (
@@ -21,13 +22,16 @@ from payments.models import Order
 from payments.services.checkout import place_order_once, scoped_idempotency_key
 from payments.services.saleor_checkout import CheckoutError
 from rest_framework import mixins, status, viewsets
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from api.authentication import HashedTokenAuthentication
 from api.errors import APIError
+from api.models import ApiToken
 
 from .serializers import (
     AddCartItemSerializer,
@@ -37,6 +41,8 @@ from .serializers import (
     ProductListResponseSerializer,
     ProductSerializer,
     ProfileSerializer,
+    TokenIssueResponseSerializer,
+    TokenRequestSerializer,
     UpdateCartItemSerializer,
 )
 
@@ -345,3 +351,72 @@ def not_found_view(request, *args, **kwargs):
         "not_found", "No such endpoint in this API version.",
         status_code=status.HTTP_404_NOT_FOUND,
     )
+
+
+@extend_schema(tags=["account"])
+class TokenView(APIView):
+    """Issue and revoke API tokens.
+
+    Tokens are stored as SHA-256 digests with an expiry (threat model R11),
+    so a database disclosure cannot yield usable credentials.
+    """
+
+    authentication_classes = [SessionAuthentication, HashedTokenAuthentication]
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "token"
+
+    @extend_schema(
+        summary="Exchange credentials for an API token",
+        request=TokenRequestSerializer,
+        responses={200: TokenIssueResponseSerializer, 400: ERROR, 429: ERROR},
+    )
+    def post(self, request):
+        payload = TokenRequestSerializer(data=request.data)
+        payload.is_valid(raise_exception=True)
+        user = authenticate(
+            request,
+            username=payload.validated_data["username"],
+            password=payload.validated_data["password"],
+        )
+        if user is None or not user.is_active:
+            # Uniform failure: no signal about which part was wrong
+            raise APIError(
+                "invalid_credentials", "Incorrect username or password.",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        token, raw_token = ApiToken.issue(user, label=request.headers.get("User-Agent", ""))
+        logger.info(
+            "API token issued",
+            extra={"event": "api_token_issued", "token_id": token.pk},
+        )
+        return Response(
+            {"token": raw_token, "expires_at": token.expires_at},
+            status=status.HTTP_200_OK,
+        )
+
+    @extend_schema(
+        summary="Revoke tokens",
+        description=(
+            "Revokes the token used for this request, or every token for the "
+            "account when authenticated with a session."
+        ),
+        request=None,
+        responses={204: None, 401: ERROR},
+    )
+    def delete(self, request):
+        if not request.user.is_authenticated:
+            raise APIError(
+                "authentication_required", "Authentication credentials were not provided.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+            )
+        if isinstance(request.auth, ApiToken):
+            deleted = ApiToken.objects.filter(pk=request.auth.pk).delete()[0]
+        else:
+            deleted = ApiToken.objects.filter(user=request.user).delete()[0]
+        logger.info(
+            "API tokens revoked",
+            extra={"event": "api_token_revoked", "count": deleted},
+        )
+        return Response(status=status.HTTP_204_NO_CONTENT)

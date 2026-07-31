@@ -647,3 +647,28 @@ class ServerTimingExposureTests(ApiTestCase):
             'SERVER_TIMING_ENABLED = config("SERVER_TIMING_ENABLED", default=False',
             source,
         )
+
+
+class ThrottleFailOpenTests(ApiTestCase):
+    """DRF's stock throttles raise when the cache is unreachable, turning a
+    Redis outage into a 500 on every API request. The storefront's limiter
+    already fails open; the API must match."""
+
+    def test_api_serves_requests_when_the_cache_is_down(self):
+        from django.core.cache import cache as django_cache
+
+        with patch.object(
+            django_cache, "get", side_effect=ConnectionError("redis down")
+        ), patch("api.v1.views.list_products", return_value=([make_product()], False)):
+            response = self.client.get("/api/v1/products/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_fail_open_is_logged_for_alerting(self):
+        from api.throttling import AnonRateThrottle
+
+        throttle = AnonRateThrottle()
+        with patch.object(
+            AnonRateThrottle, "get_cache_key", side_effect=ConnectionError("redis down")
+        ), self.assertLogs("api.throttling", level="ERROR") as captured:
+            self.assertTrue(throttle.allow_request(None, None))
+        self.assertEqual(captured.records[0].event, "throttle_fail_open")

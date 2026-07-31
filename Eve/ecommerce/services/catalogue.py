@@ -44,6 +44,28 @@ class ProductUnavailable(Exception):
     """Upstream is unreachable and no cached copy exists."""
 
 
+def _fresh_products(limit=50):
+    """Cache read that treats an unreachable cache as an empty cache.
+
+    MongoDB being down must degrade to the Saleor/stale path, not raise:
+    an unprotected read here turned a cache outage into a 500 on the
+    catalogue, and made the app unusable on a clone without MongoDB.
+    """
+    try:
+        return get_cached_products(limit=limit)
+    except Exception:
+        logger.exception("Product catalogue cache unavailable")
+        return []
+
+
+def _fresh_product(slug):
+    try:
+        return get_cached_product(slug)
+    except Exception:
+        logger.exception("Product cache unavailable (slug=%s)", slug)
+        return None
+
+
 def _stale_products(limit=50):
     try:
         return get_stale_cached_products(limit=limit)
@@ -112,7 +134,7 @@ def list_products(limit: int = 50):
     unavailable = False
 
     #  Try Mongo cache first (only entries still within the TTL)
-    cached_products = get_cached_products(limit=limit)
+    cached_products = _fresh_products(limit=limit)
     if cached_products:
         products = [sanitize_product(p) for p in cached_products if is_valid_product(p)]
 
@@ -132,7 +154,7 @@ def list_products(limit: int = 50):
                         _cache_product_safely(product)
                 else:
                     refreshed = wait_for_value(
-                        lambda: get_cached_products(limit=limit) or None,
+                        lambda: _fresh_products(limit=limit) or None,
                         timeout=CACHE_REFRESH_WAIT_SECONDS,
                     )
                     products = [
@@ -166,7 +188,7 @@ def get_product(slug: str) -> dict:
     except Exception:
         logger.exception("Negative cache unavailable")
 
-    cached = get_cached_product(slug)
+    cached = _fresh_product(slug)
     if cached and is_valid_product(cached):
         return sanitize_product(cached)
 
@@ -178,7 +200,7 @@ def get_product(slug: str) -> dict:
                 fetched_from_saleor = True
             else:
                 product = wait_for_value(
-                    lambda: get_cached_product(slug),
+                    lambda: _fresh_product(slug),
                     timeout=CACHE_REFRESH_WAIT_SECONDS,
                 ) or _stale_product(slug)
     except (SaleorAPIError, CacheLeaseUnavailable):

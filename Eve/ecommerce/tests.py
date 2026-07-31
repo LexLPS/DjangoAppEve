@@ -622,3 +622,43 @@ class CartFullHtmlFlowTests(TestCase):
             )
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "maximum of 50")
+
+
+class CatalogueCacheOutageTests(TestCase):
+    """A MongoDB outage must degrade the catalogue, not 500 it. An
+    unprotected cache read made the app unusable on a clone without
+    MongoDB installed."""
+
+    def setUp(self):
+        cache.clear()
+
+    def test_catalogue_survives_an_unreachable_cache(self):
+        from pymongo.errors import ServerSelectionTimeoutError
+
+        with (
+            patch("ecommerce.services.catalogue.get_cached_products",
+                  side_effect=ServerSelectionTimeoutError("no mongo")),
+            patch("ecommerce.services.catalogue.get_stale_cached_products",
+                  side_effect=ServerSelectionTimeoutError("no mongo")),
+            patch("ecommerce.services.catalogue.fetch_products_from_saleor",
+                  side_effect=SaleorAPIError("not_configured")),
+        ):
+            response = self.client.get(reverse("product_catalogue"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "temporarily unavailable")
+
+    def test_product_detail_survives_an_unreachable_cache(self):
+        from pymongo.errors import ServerSelectionTimeoutError
+
+        with (
+            patch("ecommerce.services.catalogue.get_cached_product",
+                  side_effect=ServerSelectionTimeoutError("no mongo")),
+            patch("ecommerce.services.catalogue.get_stale_cached_product",
+                  side_effect=ServerSelectionTimeoutError("no mongo")),
+            patch("ecommerce.services.catalogue.fetch_product_by_slug",
+                  return_value=make_product()),
+            patch("ecommerce.services.catalogue.cache_product"),
+        ):
+            response = self.client.get(reverse("product_detail", args=["eve-horizon"]))
+        # Upstream still answers, so the page renders despite no cache
+        self.assertEqual(response.status_code, 200)

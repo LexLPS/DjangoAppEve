@@ -4,10 +4,10 @@
 
 | Field | Value |
 |---|---|
-| **Assessed commit** | `0b591a6` |
+| **Assessed commit** | `94a7b8c` (+ this change) |
 | **Branch** | `capacity-analysis` |
 | **Assessment date** | 2026-07-31 |
-| **Test suite at that commit** | 244 tests, 242 passing, 2 skipped (Saleor integration, requires a live instance) |
+| **Test suite at that commit** | 258 tests, 256 passing, 2 skipped (Saleor integration, requires a live instance) |
 
 **In scope:** the Django application (storefront, REST API v1, Celery
 tasks), its three data stores, the Saleor integration (GraphQL egress and
@@ -21,12 +21,6 @@ gateway (not yet integrated — see R6).
 **Method:** data-flow and STRIDE per trust boundary, then OWASP Top 10
 (2021), an e-commerce-specific pass (section 6), and secure-header/session
 checks. Every claim below is tagged with an assurance level (next section).
-
-**Maintenance rule:** the assessed commit above must be updated whenever
-this document is revised. A stale commit makes the whole assessment
-unauditable — a reviewer cannot tell which claims were validated against
-which code. Re-run before go-live and after any change to authentication,
-payments, or a trust boundary.
 
 ## Assurance levels
 
@@ -141,7 +135,7 @@ Base image not digest-pinned, no container scan **(A**, R8**)**.
 | A04 | Insecure Design | **V + A** | V: fail-closed settings selection, idempotent checkout with a durable journal, allow-listed order transitions, circuit breaker (`CheckoutFlowTests`, `WebhookTests`, `SaleorClientResilienceTests`). A: no payment-capture step exists yet (R6); lockout is abusable against a victim (R5). |
 | A05 | Security Misconfiguration | **C** | `check --deploy` passes at `--fail-level WARNING` with custom checks `eve.W001` (trusted proxies) and `eve.W002` (rate-limit scale), and CI runs it (`TrustedProxyDeployCheckTests`, `LoadTestConfigurationTests`). But this category is **inherently config-dependent**: correct behaviour requires `DJANGO_TRUSTED_PROXIES`, `DJANGO_ALLOWED_HOSTS`, TLS backend URLs and secrets to be right in the environment. Code cannot guarantee it; the deploy check only refuses the most dangerous omissions. |
 | A06 | Vulnerable & Outdated Components | **V + D** | V: full pinned closure, `pip check` and `pip-audit` gated in CI; 12 CVEs remediated this cycle. D: monthly audit cadence is a documented procedure; base image pinning and container scanning are not implemented (R8). |
-| A07 | Identification & Authentication Failures | **V + C + A** | V: session rotation on login (`SessionFixationTests`), POST-only CSRF logout (`LogoutTests`), per-IP throttle plus cross-IP username lockout (`AccountLockoutTests`), no-enumeration password reset (`PasswordResetTests`), Argon2id (`PasswordHashingTests`), unique email (`AuthenticationTests`). C: admin MFA depends on `ADMIN_REQUIRE_MFA` and provisioned devices. A: Argon2 memory cost is a DoS surface (R12). API tokens are now hashed and expiring (R11, fixed). |
+| A07 | Identification & Authentication Failures | **V + C + A** | V: session rotation on login (`SessionFixationTests`), POST-only CSRF logout (`LogoutTests`), per-IP throttle plus cross-IP username lockout (`AccountLockoutTests`), no-enumeration password reset (`PasswordResetTests`), Argon2id (`PasswordHashingTests`), unique email (`AuthenticationTests`). C: admin MFA depends on `ADMIN_REQUIRE_MFA` and provisioned devices. A: Argon2 memory cost is a DoS surface (R12). API credentials are short-lived signed access tokens with rotating refresh, behind the same lockout and MFA policy as the login form (R11, fixed). |
 | A08 | Software & Data Integrity Failures | **V + C** | V: signed webhooks, locked dependencies, secret scanning, no client-side integrity assumptions. C: CI gates only block merges if branch protection is configured in GitHub — an external setting this repository cannot enforce. |
 | A09 | Security Logging & Monitoring Failures | **V + D** | V: structured JSON logs with correlation IDs, redaction filters, scrubbed exception blocks, auth/webhook/circuit events (`LogRedactionTests`, `ObservabilityTests`). D: alert routing, paging thresholds and SLOs are documented in OBSERVABILITY.md; nothing in code proves an alert reaches a human. |
 | A10 | SSRF | **V** | Only two operator-configured HTTPS origins are fetched (Saleor GraphQL, JWKS); no user-supplied URL is ever fetched server-side. Upstream URLs are rendered browser-side only after http(s) validation (`ExternalUrlSanitizationTests`). |
@@ -215,17 +209,42 @@ added. Fix by grouping totals per currency or refusing mixed carts.
 New concerns, including two introduced by recent performance work. None is
 currently exploited; all are recorded rather than quietly accepted.
 
-**R11 — API tokens do not expire and are stored unhashed. FIXED
-2026-07-31.** DRF's `authtoken` kept the token value in plaintext with no
-expiry, so any database read yielded working credentials indefinitely.
-Replaced with `api.models.ApiToken`: 256 bits of entropy, stored only as a
-SHA-256 digest, expiring after `API_TOKEN_TTL_DAYS` (default 30), with a
-revocation endpoint (`DELETE /api/v1/auth/token/` — the presented token, or
-every token when authenticated by session) and a `10/min` throttle on
-issuance. The plaintext `authtoken_token` table is dropped by migration
-`api.0002`, deliberately destroying any tokens it held. Assurance: **V**
-(`ApiTokenSecurityTests` — digest-only storage, expiry, inactive user,
-per-token and account-wide revocation, cross-account isolation).
+**R11 — API credential strength. HARDENED 2026-07-31 (second pass).**
+
+*First pass* replaced DRF's `authtoken` — plaintext in the database, no
+expiry — with digest-stored tokens expiring after 30 days.
+
+*Second pass* addressed what that left open. The endpoint accepted a
+password but carried only a subset of the login form's protections, and a
+30-day bearer token is still long-lived:
+
+| Gap | Now |
+|---|---|
+| No per-username lockout | Shared `accounts.services.lockout` guards both the login form and the token endpoint; failures on either lock the account |
+| No lockout notification | The owner is emailed once per window, from the same service |
+| Only a scoped throttle | Plus the login form's per-IP limit (5 per 5 min) |
+| **MFA bypass**: an admin with a confirmed TOTP device could obtain an API token with a password alone | A confirmed device now requires a current code, verified before any token is issued |
+| No email-verification policy | Issuance requires a verified address, consistent with checkout |
+| 30-day bearer token | 15-minute **signed** access token (stateless, nothing stored) plus a rotating refresh token |
+
+Refresh tokens are stored only as digests, are single-use, and rotate on
+every refresh. Replaying a retired token is treated as theft: the whole
+token family is revoked rather than the session continuing, and the event
+is logged as `refresh_token_reuse`. Because access tokens are stateless,
+revocation works through a `token_version` counter on the profile —
+bumping it invalidates every outstanding access token at once.
+
+Assurance: **V** (`TokenIssueHardeningTests` — brute force across many IPs,
+lockout shared with the HTML login, per-IP limit, MFA required/invalid/
+valid, unverified email; `AccessTokenTests` — tampering, expiry,
+revocation; `RefreshTokenRotationTests` — rotation, digest-only storage,
+reuse detection, revocation).
+
+*Review note:* the gaps above were identified in review after the first
+pass had already replaced `obtain_auth_token`. Two items in that review —
+that the endpoint still exposed DRF's stock view, and that no dedicated
+throttle existed — described the state before the first pass; the
+remaining five were accurate and are what this entry records.
 
 **R12 — Argon2 memory cost is a denial-of-service surface.** The Argon2id
 switch (a security improvement, and a 10× latency win) makes each hash cost
@@ -291,7 +310,7 @@ state was found. Assurance: **V** for the timer (`ObservabilityTests`),
 | R8 | Base image not digest-pinned; no container scan | Open | **A** |
 | R9 | Email verification not enforced | Fixed — checkout requires it | **V** |
 | R10 | Multiple accounts per email address | Fixed — form + partial unique index | **V** |
-| R11 | API tokens unhashed and non-expiring | Fixed — hashed, expiring, revocable | **V** |
+| R11 | API credential strength (storage, lifetime, lockout, MFA) | Fixed — 15-min signed access tokens, rotating refresh, shared lockout, MFA enforced | **V** |
 | R12 | Argon2 memory as a DoS surface | Open (new) | **D** monitoring |
 | R13 | `Server-Timing` timing exposure | Fixed — off in production | **V** |
 | R14 | `RATE_LIMIT_SCALE` weakens throttles | Mitigated — `eve.W002` | **V** check / **C** CI gate |
@@ -314,7 +333,7 @@ state was found. Assurance: **V** for the timer (`ObservabilityTests`),
 ## 10. How to re-verify these claims
 
 ```bash
-python manage.py test --settings=eve.settings.test   # 244 tests
+python manage.py test --settings=eve.settings.test   # 258 tests
 ```
 
 ```bash

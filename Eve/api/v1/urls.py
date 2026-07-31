@@ -15,6 +15,7 @@ from .views import (
     OrderViewSet,
     ProductViewSet,
     ProfileView,
+    TokenRefreshView,
     TokenView,
     not_found_view,
 )
@@ -34,6 +35,9 @@ urlpatterns = [
     # Token exchange for non-browser clients (mobile, server-to-server).
     # Browsers keep using session auth + CSRF.
     path("auth/token/", TokenView.as_view(), name="obtain-token"),
+    path(
+        "auth/token/refresh/", TokenRefreshView.as_view(), name="refresh-token"
+    ),
 
     path("cart/", CartView.as_view(), name="cart"),
     path("cart/items/", CartItemsView.as_view(), name="cart-items"),

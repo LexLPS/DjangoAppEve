@@ -7,67 +7,20 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.models import User
 from django.core import signing
-from django.core.cache import cache
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_POST
 
 from .forms import RegistrationForm
 from .models import Profile
 
+# Lockout lives in a service shared with the API token endpoint, so a single
+# implementation guards every password-accepting entry point.
+from .services import lockout
+
 logger = logging.getLogger(__name__)
 
 EMAIL_TOKEN_SALT = "accounts.email-verification"
 EMAIL_TOKEN_MAX_AGE = 60 * 60 * 24 * 3  # 3 days
-
-# Per-username lockout, complementing the per-IP rate limit: a distributed
-# credential-stuffing run across many IPs still locks the targeted account.
-LOCKOUT_THRESHOLD = 10
-LOCKOUT_WINDOW_SECONDS = 900
-
-
-def _lockout_key(username: str) -> str:
-    return f"lockout:{username.strip().lower()}"
-
-
-def _is_locked(username: str) -> bool:
-    try:
-        return (cache.get(_lockout_key(username)) or 0) >= LOCKOUT_THRESHOLD
-    except Exception:
-        logger.exception("Lockout cache unavailable; failing open")
-        return False
-
-
-def _record_failure(username: str) -> int:
-    key = _lockout_key(username)
-    try:
-        if cache.add(key, 1, timeout=LOCKOUT_WINDOW_SECONDS):
-            return 1
-        return cache.incr(key)
-    except Exception:
-        logger.exception("Lockout cache unavailable; failure not recorded")
-        return 0
-
-
-def _notify_lockout(username: str):
-    """Tell the real account owner their account was just locked (threat
-    model R5: deliberate lockouts should not go unnoticed). Silent when the
-    username doesn't exist — no enumeration signal."""
-    user = User.objects.filter(username=username).first()
-    if not user or not user.email:
-        return
-    from .tasks import send_lockout_email
-
-    try:
-        send_lockout_email.delay(user.pk)
-    except Exception:
-        logger.exception("Could not queue lockout notification")
-
-
-def _clear_failures(username: str):
-    try:
-        cache.delete(_lockout_key(username))
-    except Exception:
-        logger.exception("Lockout cache unavailable; could not clear failures")
 
 
 def _send_verification_email(user):
@@ -102,7 +55,7 @@ def login_view(request):
 
     if request.method == "POST":
         username = request.POST.get("username", "")
-        if username and _is_locked(username):
+        if username and lockout.is_locked(username):
             messages.error(
                 request,
                 "This account is temporarily locked after repeated failed "
@@ -115,14 +68,11 @@ def login_view(request):
 
         form = AuthenticationForm(request, data=request.POST)
         if form.is_valid():
-            _clear_failures(username)
+            lockout.clear_failures(username)
             login(request, form.get_user())
             return redirect("product_catalogue")
         if username:
-            failures = _record_failure(username)
-            if failures == LOCKOUT_THRESHOLD:  # notify exactly once per window
-                logger.warning("Account lockout triggered")
-                _notify_lockout(username)
+            lockout.register_failure(username)
     else:
         form = AuthenticationForm()
     return render(request, "accounts/login.html", {"form": form})

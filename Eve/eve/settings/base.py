@@ -52,7 +52,6 @@ INSTALLED_APPS = [
     
     # Third-party
     "rest_framework",
-    "rest_framework.authtoken",
     "drf_spectacular",
     "drf_spectacular_sidecar",  # serves Swagger UI assets locally (CSP)
     "django_otp",
@@ -287,6 +286,15 @@ TRUSTED_PROXIES = config("DJANGO_TRUSTED_PROXIES", default="", cast=Csv())
 # check (eve.W002) fails the release otherwise.
 RATE_LIMIT_SCALE = config("RATE_LIMIT_SCALE", default=1, cast=int)
 
+# API tokens are hashed at rest and expire (threat model R11)
+API_TOKEN_TTL_DAYS = config("API_TOKEN_TTL_DAYS", default=30, cast=int)
+
+# Server-Timing exposes per-request app/db/mongo timings to the client.
+# Useful for debugging and for the load test's breakdown; disabled in
+# production because it removes network noise from timing analysis
+# (threat model R13). Staging re-enables it explicitly.
+SERVER_TIMING_ENABLED = config("SERVER_TIMING_ENABLED", default=True, cast=bool)
+
 # --- Request size limits: bots and abuse, not legitimate form traffic
 DATA_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024   # 1 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 1 * 1024 * 1024
@@ -300,7 +308,7 @@ REST_FRAMEWORK = {
     # Token first: it supplies the WWW-Authenticate header, so a bad or
     # missing credential yields 401 (not DRF's session-auth default of 403).
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
+        "api.authentication.HashedTokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "EXCEPTION_HANDLER": "api.errors.exception_handler",
@@ -322,6 +330,8 @@ REST_FRAMEWORK = {
         "user": "120/min",
         # Order placement is far more expensive (and risky) than a read
         "checkout": "10/min",
+        # Credential endpoint: brute-force surface
+        "token": "10/min",
     },
 }
 

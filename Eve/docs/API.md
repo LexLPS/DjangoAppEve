@@ -52,8 +52,12 @@ curl -X POST https://<host>/api/v1/auth/token/ \
   -d '{"username": "...", "password": "..."}'
 ```
 
-Tokens do not expire; revoke by deleting the token (admin) or rotating the
-user's credentials. Everything except the public catalogue requires
+Tokens **expire** (30 days by default, `API_TOKEN_TTL_DAYS`) and are stored
+only as SHA-256 digests, so a database disclosure cannot yield usable
+credentials. The raw value is returned exactly once at issuance and cannot
+be recovered afterwards. Revoke with `DELETE /api/v1/auth/token/`: sending
+the token revokes that token; authenticating with a session revokes every
+token on the account. Issuance is throttled to 10 requests/minute. Everything except the public catalogue requires
 authentication; unauthenticated requests get `401` with
 `WWW-Authenticate: Token`.
 

@@ -556,3 +556,69 @@ class CartRobustnessTests(TestCase):
             response = self.client.get(reverse("cart"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["total_amount"], 20.0)
+
+
+class CartSizeLimitTests(TestCase):
+    """Distinct line items are capped: an unbounded cart document grows
+    toward MongoDB's 16MB limit and then fails every write permanently."""
+
+    def test_push_is_guarded_by_the_item_count(self):
+        from .services.cart_service import MAX_CART_ITEMS, add_to_cart
+
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.update_one.side_effect = [
+                MagicMock(matched_count=0),  # $inc: item not present
+                MagicMock(matched_count=1),  # $push accepted
+            ]
+            add_to_cart(7, make_product(), quantity=1)
+        push_filter = coll.update_one.call_args_list[1].args[0]
+        self.assertEqual(
+            push_filter["$expr"], {"$lt": [{"$size": "$items"}, MAX_CART_ITEMS]}
+        )
+
+    def test_full_cart_raises_rather_than_growing(self):
+        from .services.cart_service import MAX_CART_ITEMS, CartFullError, add_to_cart
+
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.update_one.side_effect = [
+                MagicMock(matched_count=0),  # $inc miss
+                MagicMock(matched_count=0),  # $push refused by the guard
+            ]
+            coll.find_one.return_value = {
+                "items": [{"product_id": f"P{i}"} for i in range(MAX_CART_ITEMS)]
+            }
+            with self.assertRaises(CartFullError):
+                add_to_cart(7, make_product(), quantity=1)
+
+    def test_concurrent_push_of_the_same_product_is_not_an_error(self):
+        from .services.cart_service import add_to_cart
+
+        with patch("ecommerce.services.cart_service.carts_collection") as coll:
+            coll.update_one.side_effect = [
+                MagicMock(matched_count=0),  # $inc miss
+                MagicMock(matched_count=0),  # another request won the push
+            ]
+            coll.find_one.return_value = {"items": [{"product_id": "UHJvZHVjdDox"}]}
+            add_to_cart(7, make_product(), quantity=1)  # must not raise
+
+
+class CartFullHtmlFlowTests(TestCase):
+    """The storefront must report a full cart, not raise a 500."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = User.objects.create_user("alice", "alice@example.com", "S3curePass!x")
+        self.client.force_login(self.user)
+
+    def test_full_cart_redirects_with_a_message(self):
+        from .services.cart_service import CartFullError
+
+        with (
+            patch("ecommerce.services.catalogue.get_cached_product", return_value=make_product()),
+            patch("ecommerce.views.add_to_cart", side_effect=CartFullError(50)),
+        ):
+            response = self.client.post(
+                reverse("add_to_cart", args=["eve-horizon"]), {"quantity": 1}, follow=True
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "maximum of 50")

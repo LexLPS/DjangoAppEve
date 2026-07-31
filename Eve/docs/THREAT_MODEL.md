@@ -1,169 +1,333 @@
 # Threat Model — Eve
 
-Scope: the Django application on branch `security-hardening` (commit
-`c403655`), its data stores, the Saleor integration (RFC 7797 detached-JWS
-webhooks), and the deployment architecture in docs/DEPLOYMENT.md. Methodology: data-flow + STRIDE per
-trust boundary, then OWASP Top 10 (2021) and secure-header/session checks.
-Review cadence: re-run this assessment before go-live and after any change
-to auth, payments, or the trust boundaries below.
+## Scope and provenance
+
+| Field | Value |
+|---|---|
+| **Assessed commit** | `0b591a6` |
+| **Branch** | `capacity-analysis` |
+| **Assessment date** | 2026-07-31 |
+| **Test suite at that commit** | 244 tests, 242 passing, 2 skipped (Saleor integration, requires a live instance) |
+
+**In scope:** the Django application (storefront, REST API v1, Celery
+tasks), its three data stores, the Saleor integration (GraphQL egress and
+RFC 7797 detached-JWS webhook ingress), and the deployment architecture in
+docs/DEPLOYMENT.md.
+
+**Out of scope:** Saleor Cloud's own security posture, Railway's platform
+isolation, MongoDB Atlas / PostgreSQL host hardening, and the payment
+gateway (not yet integrated — see R6).
+
+**Method:** data-flow and STRIDE per trust boundary, then OWASP Top 10
+(2021), an e-commerce-specific pass (section 6), and secure-header/session
+checks. Every claim below is tagged with an assurance level (next section).
+
+**Maintenance rule:** the assessed commit above must be updated whenever
+this document is revised. A stale commit makes the whole assessment
+unauditable — a reviewer cannot tell which claims were validated against
+which code. Re-run before go-live and after any change to authentication,
+payments, or a trust boundary.
+
+## Assurance levels
+
+Earlier revisions of this document marked controls "Pass", which conflated
+four very different degrees of confidence. Every claim now carries one of:
+
+| Tag | Meaning | What a reviewer can conclude |
+|---|---|---|
+| **V** — Verified | Implemented in code and covered by an automated test named here | Regression-protected; re-runnable |
+| **C** — Config-dependent | Implemented, but only effective if the deployment sets specific values | Correct code is *not* sufficient; verify the environment |
+| **D** — Documented only | Described in a runbook or doc; not enforced by code or tests | Depends on a human following a procedure |
+| **A** — Accepted risk | Known gap, deliberately not addressed | A decision, not an oversight |
+
+Where a control spans levels, the strongest claim is listed first and the
+dependency spelled out. **No row is marked V unless a named test exercises
+it.**
 
 ## 1. System overview
 
 ```mermaid
 flowchart LR
     subgraph internet [Internet]
-        U[Browser / patient user]
+        U[Browser / API client]
         S[Saleor Cloud]
     end
     subgraph edge [Edge]
         LB[LB / nginx<br/>TLS, static, 1MB limit]
     end
     subgraph app [App pods - stateless]
-        W[gunicorn / Django]
+        W[gunicorn gthread / Django]
+        C[Celery worker + Beat]
     end
     subgraph data [Data plane]
         PG[(PostgreSQL<br/>users, orders, sessions,<br/>audit log - authoritative)]
         MG[(MongoDB<br/>carts, product cache)]
-        RD[(Redis<br/>cache, rate limits,<br/>session reads)]
+        RD[(Redis<br/>cache, rate limits,<br/>session reads, broker)]
     end
     U -->|HTTPS| LB --> W
     W --> PG
     W --> MG
     W --> RD
+    C --> PG
+    C --> RD
     W -->|GraphQL HTTPS,<br/>bearer token| S
     S -->|webhooks, detached<br/>RS256 JWS| LB
     W -->|SMTP| M[Email provider]
     W -->|errors, scrubbed| SN[Sentry]
 ```
 
-## 2. Assets (what an attacker wants)
+## 2. Assets
 
 | Asset | Sensitivity | Where |
 |---|---|---|
 | Patient-adjacent profile data (long-term-patient flag, hospital, room) | **High — health-adjacent PII** | PostgreSQL |
-| Credentials (password hashes), sessions | High | PostgreSQL (+ Redis session cache) |
+| Credentials (password hashes), sessions, API tokens | High | PostgreSQL (+ Redis session cache) |
 | Orders / payment state | High (integrity > confidentiality) | PostgreSQL (Saleor holds payment detail) |
 | Saleor API token, webhook trust, secret key | High | Env vars / vault |
 | Contact messages, carts | Medium | PostgreSQL / MongoDB |
 | Availability of catalogue & checkout | Medium | — |
 
-Actors: anonymous visitor, authenticated customer, admin/staff, Saleor
-(semi-trusted upstream), infrastructure providers (Railway, DB hosts),
-external attacker, malicious insider.
+Actors: anonymous visitor, authenticated customer, API client, admin/staff,
+Saleor (semi-trusted upstream), infrastructure providers, external
+attacker, malicious insider.
 
-## 3. Trust boundaries and STRIDE highlights
+## 3. Trust boundaries (STRIDE highlights)
 
-**B1 Internet → app.** Spoofing/DoS/injection surface. Controls: TLS+HSTS,
-CSRF on all state changes, per-IP throttles + per-username lockout, input
-validation, request-size caps, CSP without unsafe-inline, autoescaping.
+**B1 Internet → app.** Spoofing/DoS/injection. Controls: TLS+HSTS **(C**,
+prod settings), CSRF on all state changes **(V**, `CsrfProtectionTests`,
+`LogoutTests`**)**, per-IP throttles and per-username lockout **(V**,
+`RateLimitUnitTests`, `SharedCacheRateLimitTests`, `AccountLockoutTests`**)**,
+input validation **(V**, `CartInputValidationTests`**)**, request-size caps
+**(V**, settings + nginx**)**, CSP without `unsafe-inline` **(V**,
+`SecurityHeadersTests`**)**, autoescaping **(V**, `XssTests`**)**.
 
-**B2 Saleor → app (data).** Product data is untrusted input: validated
-(`_is_valid_product`), sanitized (`striptags`, http(s)-only URLs) before
-caching or rendering; prices never trusted from cart or client — always
-recalculated by Saleor at checkout. Residual: a compromised Saleor tenant
-still controls product content and image hosts (info-gathering via `img`
-loads); accepted — Saleor is the commercial backbone.
+**B2 Saleor → app (data).** Product data is untrusted input: validated and
+sanitised before caching or rendering **(V**, `XssTests`,
+`ExternalUrlSanitizationTests`, `UpstreamErrorTests`**)**; prices always
+recalculated upstream at checkout **(V**, `CheckoutFlowTests`**)**.
+Residual **(A)**: a compromised Saleor tenant still controls product
+content and image hosts.
 
-**B3 Saleor → app (webhooks).** Spoofing/tampering/replay. Controls:
-detached RS256 JWS verified against Saleor's JWKS (HTTPS, cached, one
-forced refresh), event derived from the *signed* `__typename`, state
-transitions allow-listed, idempotent re-delivery, `select_for_update`.
-Replay of a captured event can only re-assert an already-valid transition.
+**B3 Saleor → app (webhooks).** Spoofing/tampering/replay. Detached RS256
+JWS verified against the instance JWKS, event derived from the *signed*
+`__typename`, transitions allow-listed, re-delivery idempotent, row-locked
+update **(V**, `WebhookTests`, `LoadTestSignerCompatibilityTests`**)**.
+JWKS reachability is **(C)** — the endpoint must be reachable from the pod.
 
-**B4 App → data stores.** ORM parameterization (SQLi) and fixed-key pymongo
-value queries (NoSQLi) hold. **Elevated trust in Redis:** Django's Redis
-cache serializes with pickle, so full Redis compromise escalates to code
-execution in app pods (see R2). Sessions are `cached_db` with JSON
-serialization and PostgreSQL authoritative.
+**B4 App → data stores.** ORM parameterisation (SQLi) and fixed-key pymongo
+value queries (NoSQLi). Redis holds cache, counters, JWKS and the Celery
+broker; the cache serialises as JSON, not pickle **(V**,
+`SafeJSONSerializerTests`**)**, so a Redis compromise can corrupt state but
+not execute code. Sessions are `cached_db` with PostgreSQL authoritative.
 
-**B5 Operators → admin.** TOTP MFA (prod default), rate-limited login,
-relocatable path, optional IP allowlist, quarterly `audit_admins` review,
-privileged actions on user data audited via `PrivacyActionLog`.
+**B5 Operators → admin.** TOTP MFA **(C**, `ADMIN_REQUIRE_MFA`, prod
+default**)**, rate-limited admin login **(V)**, relocatable path **(C)**,
+optional IP allowlist **(V** when set, `AdminIPAllowlistTests`; **C** for
+whether it is set**)**, quarterly access review **(D**, `audit_admins`**)**,
+privileged data actions audited **(V**, `PrivacyWorkflowTests`**)**.
 
-**B6 Build → deploy.** Locked deps + pip-audit + gitleaks + bandit/ruff in
-CI; image built from `requirements.lock`; secrets injected from vault at
-runtime. Residual: base image not digest-pinned, no container scan (R8).
+**B6 Build → deploy.** Locked dependency closure, pip-audit, gitleaks,
+bandit and ruff in CI **(V** in the workflow; **C** because branch
+protection must be enabled in GitHub for a red check to actually block**)**.
+Base image not digest-pinned, no container scan **(A**, R8**)**.
 
-## 4. OWASP Top 10 (2021) assessment
+## 4. OWASP Top 10 (2021)
 
-| # | Category | Status | Evidence / residual |
+| # | Category | Assurance | Evidence and caveats |
 |---|---|---|---|
-| A01 | Broken Access Control | **Pass** | Every user-owned resource filtered by `request.user` (profile API, orders, cart keyed to session user); read-only viewset; tests enforce ownership + 404-on-other-user. No object IDs accepted from clients for ownership decisions. |
-| A02 | Cryptographic Failures | **Pass w/ notes** | TLS enforced to every backend in prod; Argon2id password hashing for new and successfully authenticated accounts, with legacy PBKDF2 verification and automatic rehashing; signed email tokens (salted, 3-day expiry); RS256 webhook verification. Notes: at-rest encryption is an infra task (documented, not enforceable in code); Redis pickle trust (R2). |
-| A03 | Injection | **Pass** | ORM only (no raw SQL); pymongo values with fixed keys; autoescaped templates, `striptags` on upstream HTML, http(s)-only external URLs; CSP `script-src 'self'`, no inline JS anywhere. XSS regression tests in place. |
-| A04 | Insecure Design | **Pass w/ notes** | Fail-closed settings, checkout feature-flagged behind integration tests + webhook trust, idempotency keys, state-machine order transitions, circuit breaker. Notes: reconciliation gap for orders whose local write failed (R4); lockout can be abused against victims (R5). |
-| A05 | Security Misconfiguration | **Pass w/ notes** | `check --deploy` clean and enforced in CI; DEBUG off by default; explicit cookie policy; admin hardened; env-validated backends. Note: correctness of client IPs depends on `DJANGO_TRUSTED_PROXIES`/proxy config per platform — misconfiguration degrades throttling (R1). |
-| A06 | Vulnerable & Outdated Components | **Pass** | Full pinned closure (`requirements.lock`), pip-audit clean and gated in CI; 12 CVEs already remediated this cycle. Residual: base image pinning/scanning (R8). |
-| A07 | Identification & Authentication Failures | **Pass w/ notes** | Argon2id is the preferred password hasher; legacy PBKDF2 hashes remain valid and upgrade on login. Session rotation on login (fixation tested), POST-only CSRF logout, per-IP throttle + cross-IP username lockout, admin MFA, Django password validators, no-enumeration password reset. Notes: Argon2's memory hardness requires login-concurrency monitoring; duplicate emails are allowed at registration (R10); email verification is tracked but not enforced (R9). |
-| A08 | Software & Data Integrity Failures | **Pass w/ notes** | Signed webhooks; locked deps; secret scanning; no client-side integrity reliance. Notes: Redis pickle (R2); GitHub branch protection must be enabled manually for the CI gates to actually block (deployment step). |
-| A09 | Security Logging & Monitoring Failures | **Pass** | Structured JSON logs with correlation IDs; `django.security` surfaced; auth failures, webhook rejections, transitions, and circuit events logged; redaction filters + scrubbed exception blocks; Sentry with PII scrubbing; SLOs and paging thresholds defined. |
-| A10 | SSRF | **Pass** | The app fetches only two operator-configured HTTPS origins (Saleor GraphQL, JWKS — redirects disabled). No user-supplied URLs are ever fetched server-side; upstream URLs are rendered (browser-side) only after http(s) validation. |
+| A01 | Broken Access Control | **V** | Every user-owned resource is queryset-scoped to `request.user`; no endpoint accepts a user id. Tests: `ObjectOwnershipTests`, `OrderOwnershipTests`, `OrderEndpointTests`, `IdempotencyKeyScopingTests`. A cross-account flaw *was* found here in July and fixed (section 6.1) — this row is V because the regression is now tested, not because the design was always right. |
+| A02 | Cryptographic Failures | **V + C** | V: Argon2id hashing with legacy PBKDF2 verification and in-place upgrade (`PasswordHashingTests`); signed, expiring email tokens (`EmailVerificationTests`); RS256 webhook verification (`WebhookTests`). C: TLS to every backend is enforced by prod settings but depends on the URLs supplied. **D**: encryption at rest is an infrastructure task described in SECURITY_OPERATIONS.md and not verifiable from the codebase. |
+| A03 | Injection | **V** | ORM only. The three raw statements are constant strings with no interpolation: the readiness probe's `SELECT 1`, the `pg_stat_activity` sampler, and the `LOWER(email)` unique index in migration `accounts.0004`; pymongo queries use fixed keys with values never interpolated; templates autoescape; upstream HTML is stripped; external URLs restricted to http(s). Tests: `XssTests`, `ExternalUrlSanitizationTests`. |
+| A04 | Insecure Design | **V + A** | V: fail-closed settings selection, idempotent checkout with a durable journal, allow-listed order transitions, circuit breaker (`CheckoutFlowTests`, `WebhookTests`, `SaleorClientResilienceTests`). A: no payment-capture step exists yet (R6); lockout is abusable against a victim (R5). |
+| A05 | Security Misconfiguration | **C** | `check --deploy` passes at `--fail-level WARNING` with custom checks `eve.W001` (trusted proxies) and `eve.W002` (rate-limit scale), and CI runs it (`TrustedProxyDeployCheckTests`, `LoadTestConfigurationTests`). But this category is **inherently config-dependent**: correct behaviour requires `DJANGO_TRUSTED_PROXIES`, `DJANGO_ALLOWED_HOSTS`, TLS backend URLs and secrets to be right in the environment. Code cannot guarantee it; the deploy check only refuses the most dangerous omissions. |
+| A06 | Vulnerable & Outdated Components | **V + D** | V: full pinned closure, `pip check` and `pip-audit` gated in CI; 12 CVEs remediated this cycle. D: monthly audit cadence is a documented procedure; base image pinning and container scanning are not implemented (R8). |
+| A07 | Identification & Authentication Failures | **V + C + A** | V: session rotation on login (`SessionFixationTests`), POST-only CSRF logout (`LogoutTests`), per-IP throttle plus cross-IP username lockout (`AccountLockoutTests`), no-enumeration password reset (`PasswordResetTests`), Argon2id (`PasswordHashingTests`), unique email (`AuthenticationTests`). C: admin MFA depends on `ADMIN_REQUIRE_MFA` and provisioned devices. A: Argon2 memory cost is a DoS surface (R12). API tokens are now hashed and expiring (R11, fixed). |
+| A08 | Software & Data Integrity Failures | **V + C** | V: signed webhooks, locked dependencies, secret scanning, no client-side integrity assumptions. C: CI gates only block merges if branch protection is configured in GitHub — an external setting this repository cannot enforce. |
+| A09 | Security Logging & Monitoring Failures | **V + D** | V: structured JSON logs with correlation IDs, redaction filters, scrubbed exception blocks, auth/webhook/circuit events (`LogRedactionTests`, `ObservabilityTests`). D: alert routing, paging thresholds and SLOs are documented in OBSERVABILITY.md; nothing in code proves an alert reaches a human. |
+| A10 | SSRF | **V** | Only two operator-configured HTTPS origins are fetched (Saleor GraphQL, JWKS); no user-supplied URL is ever fetched server-side. Upstream URLs are rendered browser-side only after http(s) validation (`ExternalUrlSanitizationTests`). |
 
-## 5. Additional checks (OWASP ASVS / secure headers)
+## 5. Session, header and transport checks
 
-- Headers: CSP (no unsafe-inline), HSTS + preload (prod), `X-Frame-Options
-  DENY` + `frame-ancestors 'none'`, nosniff, Referrer-Policy,
-  Permissions-Policy — present and tested.
-- Sessions: HttpOnly, SameSite=Lax, Secure (prod), 14-day cap, rotation on
-  login, server-side invalidation on logout.
-- Rate limiting: shared across workers (Redis), fail-open with paging log
-  events; forms, API, admin, and password reset all covered.
-- Error handling: generic user-facing messages; upstream bodies structurally
-  excluded from exceptions; DEBUG off.
-- Business logic: quantities bounded at three layers (form, view, checkout
-  lines); prices server-side; duplicate submits idempotent.
+- Headers: CSP without `unsafe-inline`, `X-Frame-Options: DENY` +
+  `frame-ancestors 'none'`, nosniff, Referrer-Policy, Permissions-Policy —
+  **V** (`SecurityHeadersTests`). HSTS + preload — **C** (prod settings).
+- Sessions: HttpOnly, SameSite=Lax, 14-day cap, rotation on login,
+  server-side invalidation on logout — **V**. Secure flag — **C** (prod).
+- Rate limiting shared across workers, failing open with loud logs — **V**
+  (`SharedCacheRateLimitTests`); the fail-open decision is **A**.
+- Error handling: generic user-facing messages, upstream bodies
+  structurally excluded from exceptions — **V** (`UpstreamErrorTests`,
+  `ErrorContractTests`).
 
-## 6. Residual risks and recommendations (ranked)
+## 6. E-commerce specific review
 
-| ID | Risk | Impact | Recommendation |
+Failure modes particular to online retail rather than the generic
+categories above.
+
+| Check | Assurance | Note |
+|---|---|---|
+| Price tampering | **V** | Saleor recalculates every total; cart amounts are display-only (`CheckoutFlowTests`) |
+| Quantity tampering (zero, negative, overflow) | **V** | Bounded 1–20 per request, 99 per line (`CartInputValidationTests`) |
+| Cart / order IDOR | **V** | Session identity only (`OrderEndpointTests`, `CartEndpointTests`) |
+| Payment state forgery | **V** | Signed, deduplicated, transition-guarded (`WebhookTests`) |
+| Duplicate charge on retry | **V** | Idempotency key + durable journal (`CheckoutFlowTests`, `CheckoutEndpointTests`) |
+| Cross-account idempotency key | **V** (fixed 2026-07-30) | See 6.1 (`IdempotencyKeyScopingTests`) |
+| Unbounded cart growth | **V** (fixed 2026-07-30) | See 6.2 (`CartSizeLimitTests`, `CartFullHtmlFlowTests`) |
+| Checkout email substitution | **V** | Taken from the authenticated, verified user |
+| Order enumeration | **V** | Queryset-scoped lookups (`OrderOwnershipTests`) |
+| Mixed-currency cart totals | **A** | Wrong but unreachable today; see 6.3 |
+| Coupons / gift cards / store credit | n/a | Not implemented; no exposure |
+| Inventory oversell | **A** | Owned by Saleor at checkout time |
+
+### 6.1 Fixed — cross-account idempotency key
+
+The REST API lets clients choose their own `Idempotency-Key`, while
+`place_order_once` looked it up **globally**
+(`Order.objects.filter(idempotency_key=key)` with no user filter, and a
+`CheckoutAttempt` unique on the key alone). An account submitting a key
+another account had used was handed **that account's order** (id, Saleor
+order id, total, status); and an attacker could pre-register attempts under
+guessable keys so a victim's checkout returned `409` indefinitely.
+
+Keys are now bound to their owner before reaching the database
+(`scoped_idempotency_key` = SHA-256 of `user.pk:key`), scoped inside
+`place_order_once` so no caller can forget, with every lookup additionally
+user-filtered. No migration was required.
+
+### 6.2 Fixed — unbounded cart growth
+
+Per-item quantity was capped; the number of *distinct* line items was not,
+so a client could grow the cart document toward MongoDB's 16 MB ceiling,
+after which every write to that cart fails permanently. Capped at 50
+distinct products, enforced atomically in the update filter (`$expr` on
+`$size`) so concurrent adds cannot race past it.
+
+### 6.3 Open — mixed-currency cart totals
+
+Cart totals sum `price_amount` across line items and display whichever
+currency appears last. Unreachable today (one Saleor channel, one
+currency) and it cannot misprice an order because checkout recalculates
+upstream — but it becomes a real defect the moment a second channel is
+added. Fix by grouping totals per currency or refusing mixed carts.
+
+## 7. Findings from this review (2026-07-31)
+
+New concerns, including two introduced by recent performance work. None is
+currently exploited; all are recorded rather than quietly accepted.
+
+**R11 — API tokens do not expire and are stored unhashed. FIXED
+2026-07-31.** DRF's `authtoken` kept the token value in plaintext with no
+expiry, so any database read yielded working credentials indefinitely.
+Replaced with `api.models.ApiToken`: 256 bits of entropy, stored only as a
+SHA-256 digest, expiring after `API_TOKEN_TTL_DAYS` (default 30), with a
+revocation endpoint (`DELETE /api/v1/auth/token/` — the presented token, or
+every token when authenticated by session) and a `10/min` throttle on
+issuance. The plaintext `authtoken_token` table is dropped by migration
+`api.0002`, deliberately destroying any tokens it held. Assurance: **V**
+(`ApiTokenSecurityTests` — digest-only storage, expiry, inactive user,
+per-token and account-wide revocation, cross-account isolation).
+
+**R12 — Argon2 memory cost is a denial-of-service surface.** The Argon2id
+switch (a security improvement, and a 10× latency win) makes each hash cost
+~100 MiB. Concurrency is bounded by `workers × threads`, so a login flood
+can consume ~800 MiB per replica at the current 2×4 sizing. Per-IP throttles
+and lockout limit this, but a distributed flood across many IPs is not
+fully mitigated. Impact: medium. Recommendation: alert on memory during
+login bursts; keep thread count in the memory budget; do **not** weaken the
+Argon2 parameters to compensate.
+
+**R13 — `Server-Timing` exposes precise server-side timings. FIXED
+2026-07-31.** The header handed any client network-noise-free timing data,
+lowering the cost of timing analysis against authentication paths. It is
+now gated on `SERVER_TIMING_ENABLED`, which defaults to **False in
+production** and is re-enabled explicitly in staging, where the load test
+needs the breakdown and traffic is internal. The same numbers remain in the
+structured logs in every environment. Assurance: **V**
+(`ServerTimingExposureTests`, including an assertion on the default that
+production actually ships).
+
+**R14 — `RATE_LIMIT_SCALE` can multiply every per-IP limit.** Added for
+load testing. A deploy check (`eve.W002`) fails the release if it is ever
+non-default in production, which is the control — but the knob exists and
+weakens brute-force protection wherever it is set. Impact: low with the
+check, high without it. Assurance: **V** for the check and for the
+multiplier actually taking effect (`RateLimitScaleDeployCheckTests`), **C**
+for CI actually gating the deploy.
+
+*Note on this review:* the first draft cited `LoadTestConfigurationTests`
+here, which covers the load-test manifest, not `eve.W002` - and no test
+asserted the check at all. The test was written rather than the claim
+softened; this is exactly the overclaiming the assurance levels exist to
+prevent.
+
+**R15 — `loadtest_seed --with-webhook-key` injects a trusted signing key.**
+The command writes a throwaway public key into the JWKS cache so the load
+generator can forge valid Saleor webhook signatures. It refuses to run when
+`DJANGO_ENV=prod` and the key is TTL-bounded, but anyone able to run
+management commands against an environment can make that environment trust
+signatures they control. Impact: medium (requires command execution).
+Recommendation: keep the production guard, restrict who can run management
+commands, and prefer a separate staging Saleor instance over key injection
+once one exists.
+
+**Threading model note.** Workers now run `gthread` (4 threads). Shared
+module-level state was reviewed: the pooled `requests.Session` is
+thread-safe, circuit-breaker state lives in the shared cache, and the new
+MongoDB timer uses a `contextvar` (per-thread). No mutable global request
+state was found. Assurance: **V** for the timer (`ObservabilityTests`),
+**A** for the general claim — a targeted concurrency test does not exist.
+
+## 8. Residual risk register
+
+| ID | Risk | Status | Assurance |
 |---|---|---|---|
-| R1 | **Client-IP correctness on the platform (Railway/proxy).** If `DJANGO_TRUSTED_PROXIES` doesn't match the real proxy chain, all traffic shares one `REMOTE_ADDR`: an attacker tripping a 429 throttles *everyone* (self-DoS), and the admin allowlist misbehaves. The middleware supports CIDR ranges and `X-Real-IP`, but only correct configuration activates it. | High (availability of login/checkout) | Set `DJANGO_TRUSTED_PROXIES` (e.g. Railway's `100.64.0.0/10`) + `GUNICORN_FORWARDED_ALLOW_IPS`; add a deploy-time smoke test that two different client IPs are seen distinctly. |
-| R2 | **Redis compromise escalates to RCE** — Django's Redis cache pickles values, and rate limits/circuit state/JWKS cache live there. | High impact, low likelihood (requires Redis access) | Treat Redis as inside the app trust zone: require AUTH + TLS, private networking only. Optionally switch the cache to a JSON serializer for defense in depth. |
-| R3 | **Saleor call amplification.** Unknown product slugs are never negatively cached and slug-misses reset the circuit breaker, so `GET /shop/product/<random>/` triggers one Saleor call each — an unauthenticated cost/DoS vector against the upstream quota. | Medium | Negative-cache slug misses for a few minutes; add per-IP GET throttling at the proxy for `/shop/`. |
-| R4 | **Ambiguous checkout completion.** A response can be lost after Saleor creates an order but before Eve commits its local order. | Low/Medium (money/state divergence) | A durable `CheckoutAttempt` is written before mutation, its non-sensitive idempotency token is attached to Saleor metadata, uncertain attempts cannot be resubmitted, and hourly reconciliation repairs the local order transactionally. Manual review remains necessary if an order falls outside the configured reconciliation window. |
-| R5 | **Deliberate lockout of victims:** 10 bad passwords on someone else's username locks them out 15 min (classic lockout tradeoff). | Low–medium | Accept short window; consider CAPTCHA after N failures instead of hard lock, and notify the account owner by email on lockout. |
-| R6 | **No in-app payment capture step.** `checkoutComplete` is called without a payment-gateway flow; real charging depends on Saleor-side configuration. Safe today only because `CHECKOUT_ENABLED=False`. | High if flag flipped early | Keep the flag off until a gateway flow (Saleor payment app / transaction API) exists and the integration suite covers a real payment; already encoded in the runbook — do not weaken it. |
-| R7 | Readiness endpoint publicly reveals which backend is down and circuit state. | Low | Restrict `/healthz/ready/` to internal networks at the proxy; keep `/healthz/live/` public if the LB needs it. |
-| R8 | Container supply chain: base image tag not digest-pinned; no image vulnerability scan. | Low–medium | Pin `python:3.13-slim@sha256:...`; add Trivy (or equivalent) to CI. |
-| R9 | Email verification is recorded but nothing requires it. | Low | Gate checkout (when enabled) and contact-visible features on `email_verified`. |
-| R10 | Registration allows multiple accounts per email address. | Low | Enforce case-insensitive unique email at the form + a DB constraint; mind the enumeration tradeoff (return a neutral error). |
+| R1 | Client-IP correctness behind the platform proxy | Mitigated — CIDR + `X-Real-IP` middleware, `eve.W001` deploy check | **V** code / **C** environment |
+| R2 | Redis compromise escalating to RCE via pickle | Fixed — JSON cache serializer | **V** |
+| R3 | Saleor call amplification via unknown slugs | Fixed — negative cache | **V** |
+| R4 | Ambiguous checkout completion | Mitigated — durable journal + `reconcile_orders` | **V** code / **D** daily run |
+| R5 | Deliberate account lockout of a victim | Accepted — owner notified on lockout | **A** |
+| R6 | No in-app payment capture step | Open — gated by `CHECKOUT_ENABLED` and the go-live runbook | **C** flag / **D** runbook |
+| R7 | Readiness endpoint reveals which backend is down | Open | **D** (proxy restriction) |
+| R8 | Base image not digest-pinned; no container scan | Open | **A** |
+| R9 | Email verification not enforced | Fixed — checkout requires it | **V** |
+| R10 | Multiple accounts per email address | Fixed — form + partial unique index | **V** |
+| R11 | API tokens unhashed and non-expiring | Fixed — hashed, expiring, revocable | **V** |
+| R12 | Argon2 memory as a DoS surface | Open (new) | **D** monitoring |
+| R13 | `Server-Timing` timing exposure | Fixed — off in production | **V** |
+| R14 | `RATE_LIMIT_SCALE` weakens throttles | Mitigated — `eve.W002` | **V** check / **C** CI gate |
+| R15 | Load-test JWKS key injection | Mitigated — prod guard, TTL | **V** guard / **D** access control |
 
-## 7. Mitigation status
-
-Implemented on this branch after the initial assessment:
-
-- **R1** — `manage.py check --deploy` now warns (`eve.W001`) when
-  `DJANGO_TRUSTED_PROXIES` is unset; CI gates on warnings, so a deploy
-  without proxy configuration fails loudly. Middleware already supports
-  CIDR + `X-Real-IP` (Railway: `100.64.0.0/10`).
-- **R2** — the Redis cache now uses `SafeJSONSerializer` (JSON, ints raw
-  for INCR) instead of pickle: a compromised Redis can corrupt state but
-  not execute code.
-- **R3** — unknown product slugs are negatively cached for 5 minutes;
-  repeated probing no longer costs one Saleor call per request.
-- **R4** — `manage.py reconcile_orders [--fix]` compares recent Saleor
-  orders with the local table, reports divergence, and can recreate
-  missing records for matched users. Run daily; alert on mismatches.
-- **R5** — crossing the lockout threshold emails the account owner once
-  per window (silent for nonexistent usernames — no enumeration signal).
-- **R9** — checkout (when enabled) refuses to place orders until the
-  account's email is verified; the receipt address is therefore always
-  confirmed.
-- **R10** — one account per email address, case-insensitive: validated in
-  the registration form and enforced by a partial unique index on
-  `LOWER(email)`. The existence signal the form error reveals is bounded
-  by the registration rate limit.
-
-Still open: R6 (payment gateway — gated by the go-live runbook), R7
-(restrict readiness endpoint at the proxy), R8 (digest-pin base image,
-container scanning).
-
-## 8. Explicitly accepted risks
+## 9. Explicitly accepted risks
 
 - Saleor is trusted for product content and payment state (commercial
-  dependency); its data is nonetheless validated/sanitized on ingress.
-- Rate limiting and lockout **fail open** when Redis is down (availability
-  over brute-force protection), compensated by paging on the failure logs.
-- Mock catalogue fallback intentionally serves static demo data during
-  Saleor outages.
+  dependency); its data is validated and sanitised on ingress regardless.
+- Rate limiting and lockout **fail open** when Redis is unavailable —
+  availability chosen over brute-force protection, compensated by alerting
+  on the failure log events.
+- The storefront serves static demo products during a total catalogue
+  outage. The API deliberately does not: it returns `503`.
 - `.env` files exist for local development only; production uses a vault.
+- Idempotency-key scoping uses an unsalted SHA-256 of `user.pk:key`. The
+  digest is not secret and cannot be replayed anywhere, so a salt would add
+  no meaningful protection.
+
+## 10. How to re-verify these claims
+
+```bash
+python manage.py test --settings=eve.settings.test   # 244 tests
+```
+
+```bash
+python manage.py check --deploy --fail-level WARNING   # with production env vars
+```
+
+```bash
+pip-audit -r requirements.lock
+```
+
+Static analysis (`ruff check Eve`, `bandit -r Eve -c Eve/bandit.yaml -ll`)
+and secret scanning (gitleaks) run in `.github/workflows/ci.yml`. Every
+**V** claim above names the test class that covers it; every **C** claim
+names the setting it depends on; **D** claims point at the runbook that
+describes the procedure. Anything marked **A** is a decision to revisit,
+not a control.

@@ -15,7 +15,7 @@ from django.views.decorators.http import require_POST
 from ecommerce.services.cart_service import clear_cart, get_cart
 
 from .models import CheckoutAttempt, Order, WebhookEvent
-from .services.checkout import place_order_once
+from .services.checkout import place_order_once, scoped_idempotency_key
 from .services.saleor_checkout import CheckoutError
 from .services.saleor_webhooks import WebhookSignatureError, verify_saleor_signature
 
@@ -64,7 +64,10 @@ def checkout_view(request):
     if not idempotency_key:
         return redirect("checkout")
 
-    if Order.objects.filter(idempotency_key=idempotency_key).exists():
+    if Order.objects.filter(
+        idempotency_key=scoped_idempotency_key(request.user, idempotency_key),
+        user=request.user,
+    ).exists():
         messages.info(request, "This order was already placed.")
         return redirect("payment_history")
 

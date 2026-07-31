@@ -7,7 +7,8 @@ from django.core.cache import cache
 from django.test import TestCase, override_settings
 from payments.models import Order
 from payments.services.saleor_checkout import CheckoutError
-from rest_framework.authtoken.models import Token
+
+from api.models import ApiToken, hash_token
 
 
 def make_product(**overrides):
@@ -101,10 +102,10 @@ class AuthenticationTests(ApiTestCase):
         self.assertIn("Token", response["WWW-Authenticate"])
 
     def test_token_auth_works_for_non_browser_clients(self):
-        token = Token.objects.create(user=self.user)
+        _, token_key = ApiToken.issue(self.user)
         with patch("api.v1.views.cart_service.get_cart", return_value=make_cart(self.user.id)):
             response = self.client.get(
-                "/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {token.key}"
+                "/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {token_key}"
             )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["item_count"], 2)
@@ -127,7 +128,7 @@ class AuthenticationTests(ApiTestCase):
             "/api/v1/auth/token/", {"username": "alice", "password": "wrong"}
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json()["error"]["code"], "validation_error")
+        self.assertEqual(response.json()["error"]["code"], "invalid_credentials")
 
 
 class CartEndpointTests(ApiTestCase):
@@ -210,8 +211,12 @@ class CheckoutEndpointTests(ApiTestCase):
         self.client.force_login(self.user)
 
     def _order(self, key="key-1"):
+        from payments.services.checkout import scoped_idempotency_key
+
+        # Stored scoped to the user, exactly as place_order_once writes it
         return Order.objects.create(
-            user=self.user, saleor_order_id="ORD-API-1", idempotency_key=key,
+            user=self.user, saleor_order_id="ORD-API-1",
+            idempotency_key=scoped_idempotency_key(self.user, key),
             total_amount="99.98", currency="EUR", status=Order.Status.PENDING,
         )
 
@@ -446,3 +451,199 @@ class OpenAPISchemaTests(TestCase):
             response = self.client.get("/api/v1/products/")
         self.assertIn("style-src 'self'", response["Content-Security-Policy"])
         self.assertNotIn("unsafe-inline", response["Content-Security-Policy"])
+
+
+@override_settings(CHECKOUT_ENABLED=True)
+class IdempotencyKeyScopingTests(ApiTestCase):
+    """API clients choose their own Idempotency-Key. Two accounts picking the
+    same string must never see each other's orders or block each other."""
+
+    def setUp(self):
+        super().setUp()
+        self.mallory = User.objects.create_user(
+            "mallory", "mallory@example.com", "S3curePass!x"
+        )
+        Profile.objects.create(user=self.mallory, email_verified=True)
+
+    def _alice_places_order(self, key="shared-key-1"):
+        from payments.services.checkout import scoped_idempotency_key
+
+        return Order.objects.create(
+            user=self.user, saleor_order_id="ORD-ALICE",
+            idempotency_key=scoped_idempotency_key(self.user, key),
+            total_amount="99.98", currency="EUR", status=Order.Status.PENDING,
+        )
+
+    def test_reused_key_does_not_disclose_another_users_order(self):
+        alice_order = self._alice_places_order()
+        self.client.force_login(self.mallory)
+
+        with (
+            patch("api.v1.views.cart_service.get_cart",
+                  return_value=make_cart(self.mallory.id)),
+            patch("api.v1.views.cart_service.clear_cart"),
+            patch("api.v1.views.place_order_once", return_value=None) as place,
+        ):
+            response = self.client.post(
+                "/api/v1/checkout/", **{"HTTP_IDEMPOTENCY_KEY": "shared-key-1"}
+            )
+        # Mallory must not receive Alice's order under any status code
+        body = response.content.decode()
+        self.assertNotIn("ORD-ALICE", body)
+        self.assertNotIn(str(alice_order.id), body.split("request_id")[0])
+        place.assert_called_once()  # not short-circuited by Alice's record
+
+    def test_same_key_still_replays_for_its_owner(self):
+        alice_order = self._alice_places_order(key="replay-key")
+        self.client.force_login(self.user)
+        with patch("api.v1.views.place_order_once") as place:
+            response = self.client.post(
+                "/api/v1/checkout/", **{"HTTP_IDEMPOTENCY_KEY": "replay-key"}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["saleor_order_id"], alice_order.saleor_order_id)
+        place.assert_not_called()
+
+    def test_one_account_cannot_block_anothers_checkout_with_a_guessed_key(self):
+        from payments.models import CheckoutAttempt
+        from payments.services.checkout import scoped_idempotency_key
+
+        # Mallory pre-registers an in-flight attempt under a guessable key
+        CheckoutAttempt.objects.create(
+            user=self.mallory,
+            idempotency_key=scoped_idempotency_key(self.mallory, "guessable"),
+            cart_fingerprint="x",
+            state=CheckoutAttempt.State.COMPLETING,
+        )
+        # Alice uses the same string and must be unaffected
+        self.client.force_login(self.user)
+        with (
+            patch("api.v1.views.cart_service.get_cart", return_value=make_cart(self.user.id)),
+            patch("api.v1.views.cart_service.clear_cart"),
+            patch("api.v1.views.place_order_once") as place,
+        ):
+            # Created when the view calls the service, not before it
+            place.side_effect = lambda **kwargs: Order.objects.create(
+                user=self.user, saleor_order_id="ORD-ALICE-OK",
+                idempotency_key=scoped_idempotency_key(self.user, "guessable"),
+                total_amount="10.00", currency="EUR", status=Order.Status.PENDING,
+            )
+            response = self.client.post(
+                "/api/v1/checkout/", **{"HTTP_IDEMPOTENCY_KEY": "guessable"}
+            )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["saleor_order_id"], "ORD-ALICE-OK")
+
+    def test_scoping_is_per_user_and_deterministic(self):
+        from payments.services.checkout import scoped_idempotency_key
+
+        self.assertEqual(
+            scoped_idempotency_key(self.user, "k"), scoped_idempotency_key(self.user, "k")
+        )
+        self.assertNotEqual(
+            scoped_idempotency_key(self.user, "k"),
+            scoped_idempotency_key(self.mallory, "k"),
+        )
+
+
+class ApiTokenSecurityTests(ApiTestCase):
+    """R11: tokens must be unusable from a database disclosure and must
+    expire."""
+
+    def test_only_a_digest_is_stored(self):
+        token, raw = ApiToken.issue(self.user)
+        self.assertNotIn(raw, ApiToken.objects.values_list("token_hash", flat=True))
+        self.assertEqual(token.token_hash, hash_token(raw))
+        self.assertEqual(len(token.token_hash), 64)
+        # Nothing anywhere on the row reveals the raw value
+        self.assertNotIn(raw, str(token.__dict__))
+
+    def test_issued_token_authenticates_and_records_use(self):
+        _, raw = ApiToken.issue(self.user)
+        with patch("api.v1.views.cart_service.get_cart", return_value=make_cart(self.user.id)):
+            response = self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(ApiToken.objects.get().last_used_at)
+
+    def test_expired_token_is_rejected(self):
+        from django.utils import timezone
+
+        token, raw = ApiToken.issue(self.user)
+        token.expires_at = timezone.now() - timezone.timedelta(seconds=1)
+        token.save(update_fields=["expires_at"])
+        response = self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "authentication_failed")
+
+    def test_token_of_an_inactive_user_is_rejected(self):
+        _, raw = ApiToken.issue(self.user)
+        self.user.is_active = False
+        self.user.save(update_fields=["is_active"])
+        response = self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
+        self.assertEqual(response.status_code, 401)
+
+    def test_issue_endpoint_returns_the_raw_token_once_with_an_expiry(self):
+        response = self.client.post(
+            "/api/v1/auth/token/",
+            {"username": "alice", "password": "S3curePass!x"},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["token"])
+        self.assertTrue(body["expires_at"])
+        # The stored row holds the digest of what was returned, not the value
+        self.assertEqual(ApiToken.objects.get().token_hash, hash_token(body["token"]))
+
+    def test_revoking_with_a_token_removes_only_that_token(self):
+        _, keep = ApiToken.issue(self.user)
+        _, revoke = ApiToken.issue(self.user)
+        response = self.client.delete(
+            "/api/v1/auth/token/", HTTP_AUTHORIZATION=f"Token {revoke}"
+        )
+        self.assertEqual(response.status_code, 204)
+        remaining = list(ApiToken.objects.values_list("token_hash", flat=True))
+        self.assertEqual(remaining, [hash_token(keep)])
+
+    def test_revoking_with_a_session_removes_every_token(self):
+        ApiToken.issue(self.user)
+        ApiToken.issue(self.user)
+        self.client.force_login(self.user)
+        response = self.client.delete("/api/v1/auth/token/")
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(ApiToken.objects.count(), 0)
+
+    def test_one_users_token_cannot_reach_another_users_data(self):
+        mallory = User.objects.create_user("mallory", "m@example.com", "S3curePass!x")
+        _, raw = ApiToken.issue(mallory)
+        with patch("api.v1.views.cart_service.get_cart") as get_cart:
+            get_cart.return_value = make_cart(mallory.id, items=[])
+            self.client.get("/api/v1/cart/", HTTP_AUTHORIZATION=f"Token {raw}")
+        get_cart.assert_called_once_with(mallory.id)
+
+
+class ServerTimingExposureTests(ApiTestCase):
+    """R13: the timing side channel must be off in production."""
+
+    @override_settings(SERVER_TIMING_ENABLED=True)
+    def test_header_present_when_enabled(self):
+        response = self.client.get("/api/v1/products/", **{"HTTP_ACCEPT": "application/json"})
+        self.assertIn("Server-Timing", response.headers)
+
+    @override_settings(SERVER_TIMING_ENABLED=False)
+    def test_header_absent_when_disabled(self):
+        response = self.client.get("/api/v1/products/", **{"HTTP_ACCEPT": "application/json"})
+        self.assertNotIn("Server-Timing", response.headers)
+
+    def test_production_settings_disable_it_by_default(self):
+        # Asserted at source level: importing prod.py raises without a
+        # complete production environment, and what matters here is the
+        # default that ships, not the toggle's mechanics.
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parent.parent / "eve" / "settings" / "prod.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'SERVER_TIMING_ENABLED = config("SERVER_TIMING_ENABLED", default=False',
+            source,
+        )

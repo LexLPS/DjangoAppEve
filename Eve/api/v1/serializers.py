@@ -189,3 +189,10 @@ class TokenRequestSerializer(serializers.Serializer):
 
 class TokenResponseSerializer(serializers.Serializer):
     token = serializers.CharField()
+
+
+class TokenIssueResponseSerializer(serializers.Serializer):
+    """The raw token is returned once and cannot be recovered afterwards."""
+
+    token = serializers.CharField(help_text="Store this now; it is never shown again.")
+    expires_at = serializers.DateTimeField()

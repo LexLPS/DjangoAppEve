@@ -12,6 +12,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 
 from .models import CheckoutAttempt, Order, WebhookEvent
+from .services.checkout import scoped_idempotency_key
 from .services.saleor_checkout import CheckoutError
 from .services.saleor_webhooks import WebhookSignatureError
 
@@ -124,6 +125,8 @@ class CheckoutFlowTests(TestCase):
             ),
         ):
             self.client.get(reverse("checkout"))  # sets the idempotency key
+            # Keep the RAW key: the database stores it scoped to the user
+            self.raw_key = self.client.session["checkout_idempotency_key"]
             return self.client.post(reverse("checkout"))
 
     def test_order_uses_saleor_calculated_total_not_cart_price(self):
@@ -140,10 +143,9 @@ class CheckoutFlowTests(TestCase):
 
     def test_duplicate_submit_with_same_key_creates_one_order(self):
         self._post_checkout()
-        key_used = Order.objects.get().idempotency_key
-        # Simulate a double-submit: same idempotency key, second POST
+        # Simulate a double-submit: the browser replays the same raw key
         session = self.client.session
-        session["checkout_idempotency_key"] = key_used
+        session["checkout_idempotency_key"] = self.raw_key
         session.save()
         with (
             patch("payments.views.get_cart", return_value=self.cart),
@@ -211,7 +213,9 @@ class CheckoutFlowTests(TestCase):
         self.assertRedirects(
             second, reverse("payment_history"), fetch_redirect_response=False
         )
-        attempt = CheckoutAttempt.objects.get(idempotency_key=key)
+        attempt = CheckoutAttempt.objects.get(
+            idempotency_key=scoped_idempotency_key(self.user, key)
+        )
         self.assertEqual(attempt.state, CheckoutAttempt.State.UNKNOWN)
         self.assertEqual(attempt.saleor_checkout_id, "CHK-UNKNOWN")
         create_mock.assert_called_once()
@@ -246,7 +250,9 @@ class CheckoutFlowTests(TestCase):
         self.assertRedirects(
             response, reverse("payment_history"), fetch_redirect_response=False
         )
-        attempt = CheckoutAttempt.objects.get(idempotency_key=key)
+        attempt = CheckoutAttempt.objects.get(
+            idempotency_key=scoped_idempotency_key(self.user, key)
+        )
         self.assertEqual(attempt.state, CheckoutAttempt.State.COMPLETED)
         self.assertEqual(create_mock.call_count, 2)
 
